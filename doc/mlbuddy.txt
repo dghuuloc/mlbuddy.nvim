@@ -1,0 +1,675 @@
+*mlbuddy.txt*   Enterprise ML/DL development plugin for Neovim 0.12
+*mlbuddy*
+
+                              mlbuddy.nvim
+                   Enterprise Machine Learning Plugin
+                       for Neovim 0.10 / 0.12
+
+==============================================================================
+CONTENTS                                                    *mlbuddy-contents*
+
+  1. Introduction ................................ |mlbuddy-intro|
+  2. Requirements ................................ |mlbuddy-requirements|
+  3. Installation ................................ |mlbuddy-install|
+  4. Setup ....................................... |mlbuddy-setup|
+  5. Modules ..................................... |mlbuddy-modules|
+     5.1  TorchView .............................. |mlbuddy-torchview|
+     5.2  MLflow ................................. |mlbuddy-mlflow|
+     5.3  DataLoader ............................. |mlbuddy-dataloader|
+     5.4  Trainer ................................ |mlbuddy-trainer|
+     5.5  GPU Monitor ............................ |mlbuddy-gpu|
+     5.6  Runner ................................. |mlbuddy-runner|
+     5.7  Checkpoint Manager ..................... |mlbuddy-checkpoint|
+     5.8  Notebook ............................... |mlbuddy-notebook|
+     5.9  Dataset Explorer ....................... |mlbuddy-dataset|
+     5.10 Profiler Viewer ........................ |mlbuddy-profiler|
+     5.11 Environment Manager .................... |mlbuddy-env|
+     5.12 Weights & Biases ....................... |mlbuddy-wandb|
+     5.13 Statusline ............................. |mlbuddy-statusline|
+  6. Commands .................................... |mlbuddy-commands|
+  7. Keymaps ..................................... |mlbuddy-keymaps|
+  8. Configuration ............................... |mlbuddy-config|
+  9. API ......................................... |mlbuddy-api|
+ 10. Health Check ................................ |mlbuddy-health|
+ 11. Changelog .................................. |mlbuddy-changelog|
+
+==============================================================================
+1. INTRODUCTION                                               *mlbuddy-intro*
+
+mlbuddy.nvim turns Neovim into a comprehensive ML/DL workstation. It is built
+around PyTorch and provides 13 loosely-coupled modules that each solve one
+specific part of the ML research/production workflow:
+
+  • Visualize model architectures inline in your source code
+  • Track live training metrics with real-time 2-D ASCII charts
+  • Monitor GPU memory and utilisation with automatic alerts
+  • Browse, launch, and debug training scripts from inside Neovim
+  • Inspect tensors at DAP breakpoints or via cursor-word evaluation
+  • Manage checkpoints, virtual environments, and datasets
+  • Execute Jupyter-style cells (# %%) without leaving Neovim
+  • View PyTorch Profiler traces and MLflow / W&B experiment logs
+
+==============================================================================
+2. REQUIREMENTS                                        *mlbuddy-requirements*
+
+Minimum:
+  • Neovim 0.10  (vim.system, vim.uv)
+  Recommended:
+  • Neovim 0.12  (full vim.uv, virt_lines, ui2)
+
+Optional dependencies (only for specific modules):
+  • nvim-treesitter + python parser   TorchView virtual-text
+  • curl                              MLflow / W&B REST clients
+  • Python 3.8+ with torch/numpy      DataLoader, Checkpoint, Dataset, Notebook
+  • nvidia-smi or rocm-smi            GPU Monitor
+  • torchrun / accelerate             Multi-GPU launcher
+  • IPython                           Notebook cell kernel
+  • safetensors (pip)                 .safetensors checkpoint reading
+  • nvim-dap                          Auto tensor inspection at breakpoints
+
+Run |:MlbuddyHealth| (or |:checkhealth| mlbuddy) to verify your setup.
+
+==============================================================================
+3. INSTALLATION                                            *mlbuddy-install*
+
+lazy.nvim: >lua
+  {
+    "yourusername/mlbuddy.nvim",
+    ft = "python",
+    config = function()
+      require("mlbuddy").setup()
+    end,
+  }
+<
+
+vim-plug: >vim
+  Plug 'yourusername/mlbuddy.nvim'
+  autocmd VimEnter * lua require("mlbuddy").setup()
+<
+
+==============================================================================
+4. SETUP                                                     *mlbuddy-setup*
+
+Call `require("mlbuddy").setup(opts)` once.  All keys are optional. >lua
+
+  require("mlbuddy").setup({
+    border = "rounded",    -- float border style
+    width  = 84,           -- default float width
+    height = 40,           -- default float height
+
+    mlflow  = { tracking_uri = "http://myserver:5000" },
+    gpu     = { refresh_interval = 1000, alert_vram_pct = 85 },
+    trainer = { chart_series = { "loss", "val_loss", "acc" } },
+    runner  = { python = "/path/to/venv/bin/python" },
+    wandb   = { entity = "myteam", project = "gpt4-finetune" },
+  })
+<
+See |mlbuddy-config| for the full option reference.
+
+==============================================================================
+5. MODULES                                                  *mlbuddy-modules*
+
+------------------------------------------------------------------------------
+5.1 TorchView                                             *mlbuddy-torchview*
+
+Parses the current Python buffer with Treesitter, finds all `nn.Module`
+subclasses and displays them in a float window with:
+
+  • A `├─ / └─` layer tree
+  • Estimated parameter counts for 25+ layer types
+  • Colour-coded `█░` parameter bars relative to the largest layer
+  • Inline virtual-text hints on every `self.xxx = nn.YYY(...)` line
+
+The Treesitter parser is used for robustness; a regex fallback fires when
+it is unavailable.  Virtual-text attaches automatically on BufRead/BufWrite.
+
+Toggle:  <leader>mv  or  :MlbuddyTorchView
+
+Inside the float:
+  q    Close
+  R    Re-parse (e.g. after saving)
+  zo   Expand
+  zc   Collapse
+
+------------------------------------------------------------------------------
+5.2 MLflow                                                   *mlbuddy-mlflow*
+
+Live view of the MLflow Tracking Server (REST API v2).
+
+  • Lists all experiments; switch between them with [e]
+  • Run table: status badge, name, last metric values, sparkline trend, age
+  • Sparklines (`▁▂▃▄▅▆▇█`) built from metric history
+  • Press <CR> on any run for a full params + metrics detail view
+  • Auto-refreshes every `refresh_interval` ms (default 5 s)
+
+Requires curl.  Set `MLFLOW_TRACKING_URI` or `mlflow.tracking_uri`.
+
+Toggle: <leader>me  or  :MlbuddyMLflow
+
+------------------------------------------------------------------------------
+5.3 DataLoader                                          *mlbuddy-dataloader*
+
+Tensor / batch inspector with two input methods:
+
+  1. <leader>mt  (or :MlbuddyInspect) — evaluates the word under the cursor
+     by running a Python subprocess and returns shape, dtype, min/max/mean/std,
+     NaN/Inf flags, a 2-D block-char heatmap, and a histogram sparkline.
+
+  2. DAP integration — when stopped at a breakpoint (nvim-dap), automatically
+     inspects the variable under the cursor via a DAP `evaluate` request.
+     No extra configuration required; DAP hooks are installed lazily.
+
+Supports: `torch.Tensor`, `numpy.ndarray`
+
+Toggle: <leader>md  or  :MlbuddyDataLoader
+Inspect: <leader>mt  or  :MlbuddyInspect
+
+Inside the float:
+  q      Close
+  R      Re-render
+  <Tab>  Cycle through last 8 inspected tensors
+
+------------------------------------------------------------------------------
+5.4 Trainer                                               *mlbuddy-trainer*
+
+Live training dashboard that captures and parses stdout from a running
+training process.
+
+  • Handles: PyTorch Lightning, HuggingFace Trainer, tqdm, JSON logs,
+    Accelerate, and any `key=value` / `key: value` output
+  • Real-time 2-D ASCII chart with multiple series, labelled axes,
+    auto-scaling, and EMA smoothing
+  • Progress bar with elapsed time and ETA
+  • Latest metrics table (min, max, last, delta)
+  • Log tail (last 8 raw lines)
+  • Multiple concurrent jobs supported
+
+Launch a training job: >
+  :MlbuddyRun train.py --lr 1e-3 --epochs 50
+  :MlbuddyRun                        " runs current file
+<
+
+Toggle monitor: <leader>mT  or  :MlbuddyTrainer
+
+Inside the float:
+  q      Close
+  p      Send Ctrl-C (interrupt)
+  K      Kill job (SIGKILL)
+  <Tab>  Cycle displayed metric (loss → val_loss → acc → …)
+  R      Clear metric history
+
+Programmatic launch: >lua
+  require("mlbuddy").train({ "python", "train.py", "--lr", "1e-3" })
+<
+
+------------------------------------------------------------------------------
+5.5 GPU Monitor                                               *mlbuddy-gpu*
+
+Real-time GPU stats panel with:
+
+  • Per-GPU utilisation and VRAM gauge bars
+  • Temperature, power draw, fan speed, clock frequency
+  • Rolling sparkline history (60 samples)
+  • Automatic OOM and high-temperature alerts
+  • Background polling for statusline integration (no window needed)
+
+Supports nvidia-smi (NVIDIA) and rocm-smi (AMD).
+Set `gpu.backend = "mock"` for testing without a GPU.
+
+Toggle:  <leader>mG  or  :MlbuddyGpu
+
+Inside the float:
+  q   Close
+  R   Manual refresh
+
+------------------------------------------------------------------------------
+5.6 Runner                                                   *mlbuddy-runner*
+
+Detects the training framework for the current script and builds the correct
+launch command:
+
+  Framework    Detection                     Launcher
+  ─────────────────────────────────────────────────────
+  Lightning    from lightning / pl.Trainer   python script.py
+  HuggingFace  from transformers / Trainer(  python script.py
+  Accelerate   from accelerate / Accelerator accelerate launch script.py
+  torchrun     dist.init_process_group       torchrun [--args] script.py
+  Plain        fallback                      python script.py
+
+Two run modes:
+  1. Training Monitor — captures stdout, displays live dashboard
+  2. Terminal Split   — opens a terminal split (Ctrl-C to stop)
+
+Interactive picker: <leader>mR  or  :MlbuddyRun (with no args)
+Quick run:          <leader>mr  or  <F5>  (runs current file with monitor)
+
+------------------------------------------------------------------------------
+5.7 Checkpoint Manager                                   *mlbuddy-checkpoint*
+
+Scans workspace directories for checkpoint files and inspects them:
+
+  Extensions: .pt, .pth, .ckpt, .safetensors, .bin
+
+  For each checkpoint shows:
+    • File size and modification time
+    • Checkpoint type (plain torch, Lightning, HuggingFace)
+    • State-dict keys (first 20)
+    • Embedded metadata: epoch, step, loss, total params, hyperparams
+
+  Actions:
+    <CR>  Inspect selected checkpoint
+    r     Resume training from this checkpoint (opens runner picker)
+    dd    Delete with confirmation
+    R     Rescan directories
+
+Toggle: <leader>mC  or  :MlbuddyCheckpoint
+
+Configure scan roots: >lua
+  checkpoint = {
+    scan_roots = { ".", "checkpoints", "outputs", "runs" },
+    deep_scan  = true,   -- recursive scan
+  }
+<
+
+------------------------------------------------------------------------------
+5.8 Notebook                                             *mlbuddy-notebook*
+
+Jupyter-style cell execution using `# %%` markers — no Jupyter server needed.
+
+  • Detects `# %%`, `# In[N]:`, `# <<<` cell boundaries
+  • Starts an IPython kernel in a terminal split
+  • Sends cell code, polls for output, renders as virtual lines below the cell
+  • `✓ done` / `⏳ Running…` / `⚠ timeout` status markers
+  • Cell boundary `▶` signs in the sign column
+
+Cell separators: any of `# %%`, `# In[1]:`, `# <<<`
+
+Keymaps (Python buffers only):
+  <leader>mn  Run cell under cursor
+  <leader>mN  Run all cells
+  <leader>mA  Run all cells above cursor
+  ]n          Next cell
+  [n          Previous cell
+  <leader>mo  Insert new cell below
+  <leader>mi  Interrupt kernel (Ctrl-C)
+  <leader>mk  Restart kernel
+  <leader>mO  Toggle cell output visibility
+
+Insert-mode shortcut: typing `%%` on a blank line inserts `# %%`.
+
+Commands: >
+  :MlbuddyNotebook          " run cell
+  :MlbuddyNotebookAll       " run all cells
+  :MlbuddyKernel restart    " restart kernel
+  :MlbuddyKernel interrupt  " interrupt kernel
+<
+
+------------------------------------------------------------------------------
+5.9 Dataset Explorer                                      *mlbuddy-dataset*
+
+Introspects the Python object under the cursor and displays:
+
+  • HuggingFace Dataset / DatasetDict: splits, sizes, feature schema, samples
+  • PyTorch Dataset: length, sample items
+  • NumPy ndarray: shape, dtype, statistics, sample values
+
+Position the cursor on a variable name (e.g. `train_dataset`) and press
+<leader>mD.
+
+Toggle: <leader>mD  or  :MlbuddyDataset
+Re-inspect: R (inside the float)
+
+------------------------------------------------------------------------------
+5.10 Profiler Viewer                                     *mlbuddy-profiler*
+
+Views PyTorch Profiler chrome trace JSON output:
+
+  • Aggregates events by op name
+  • Shows Top-N ops sorted by CUDA time, CPU time, memory, or call count
+  • Colour-coded proportional bars for visual weight
+  • Cycle sort key with [s]
+
+Generate a trace: >python
+  from torch.profiler import profile, record_function, ProfilerActivity
+  with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+               on_trace_ready=torch.profiler.tensorboard_trace_handler(".")) as p:
+      model(inputs)
+  p.export_chrome_trace("trace.json")
+<
+
+Load and view: >
+  :MlbuddyProfiler trace.json
+  :MlbuddyProfiler            " uses current buffer if it is a .json
+<
+
+Toggle: <leader>mP  or  :MlbuddyProfiler
+
+Inside the float:
+  s   Cycle sort key (cuda_time → cpu_time → memory → count)
+  q   Close
+
+------------------------------------------------------------------------------
+5.11 Environment Manager                                      *mlbuddy-env*
+
+Detects all available Python environments and allows activating one:
+
+  • conda (via CONDA_PREFIX / CONDA_DEFAULT_ENV)
+  • Local .venv, venv, .env
+  • Poetry (via `poetry env info`)
+  • pyenv (via `pyenv which python`)
+  • System Python fallback
+
+For each env shows: type, name, Python version, prefix path.
+With [p] loads installed packages (pip list).
+With <CR> activates the env for this Neovim session (updates PATH,
+VIRTUAL_ENV).
+
+Toggle: <leader>mE  or  :MlbuddyEnv
+
+------------------------------------------------------------------------------
+5.12 Weights & Biases                                        *mlbuddy-wandb*
+
+Browse W&B runs for a configured entity/project:
+
+  • Run table: status, name, last metrics, sparkline trend, age
+  • Sparklines fetched from run history
+  • Auto-refresh every `refresh_interval` ms (default 10 s)
+
+Requires: WANDB_API_KEY environment variable; curl.
+
+Configure: >lua
+  wandb = {
+    entity  = "myteam",
+    project = "gpt-finetune",
+  }
+<
+Or set WANDB_ENTITY / WANDB_PROJECT environment variables.
+
+Toggle: <leader>mw  or  :MlbuddyWandB
+
+------------------------------------------------------------------------------
+5.13 Statusline                                          *mlbuddy-statusline*
+
+Provides components for lualine, heirline, or raw statusline.
+
+lualine: >lua
+  require("lualine").setup({
+    sections = {
+      lualine_x = {
+        require("mlbuddy").lualine_gpu(),    -- 󰊗 GPU0 72% 14.2GiB 68°C
+        require("mlbuddy").lualine_env(),    -- 󰏗 .venv
+        require("mlbuddy").lualine_job(),    -- ⠙ training step 1240
+      },
+    },
+  })
+<
+
+heirline: >lua
+  local MlbuddyStatus = require("mlbuddy").heirline_component()
+<
+
+Raw: >lua
+  vim.opt.statusline = "%f  " .. require("mlbuddy").statusline_expr()
+<
+
+==============================================================================
+6. COMMANDS                                              *mlbuddy-commands*
+
+  :MlbuddyTorchView           Toggle model architecture inspector
+  :MlbuddyMLflow              Toggle MLflow experiment tracker
+  :MlbuddyDataLoader          Toggle tensor inspector
+  :MlbuddyInspect             Inspect expression under cursor
+  :MlbuddyTrainer             Toggle Training Monitor dashboard
+  :MlbuddyRun [file] [args]   Run script with Training Monitor
+  :MlbuddyRunTerminal [file]  Run script in terminal split
+  :MlbuddyGpu                 Toggle GPU monitor
+  :MlbuddyCheckpoint          Toggle Checkpoint manager
+  :MlbuddyNotebook            Run cell under cursor
+  :MlbuddyNotebookAll         Run all cells
+  :MlbuddyKernel restart      Restart IPython kernel
+  :MlbuddyKernel interrupt    Interrupt IPython kernel
+  :MlbuddyDataset             Toggle Dataset explorer
+  :MlbuddyProfiler [path]     Load + view profiler trace
+  :MlbuddyEnv                 Toggle Environment manager
+  :MlbuddyWandB               Toggle W&B run browser
+  :MlbuddyDashboard           Open TorchView + Trainer + GPU side-by-side
+  :MlbuddyHealth              Run dependency health check
+  :checkhealth mlbuddy        Standard Neovim health check
+
+==============================================================================
+7. KEYMAPS                                                *mlbuddy-keymaps*
+
+Global (set by setup()):
+  <leader>mv   TorchView toggle
+  <leader>me   MLflow toggle
+  <leader>md   DataLoader toggle
+  <leader>mt   Inspect tensor under cursor
+  <leader>mT   Trainer dashboard toggle
+  <leader>mG   GPU monitor toggle
+  <leader>mr   Run current file (Training Monitor)
+  <leader>mR   Runner interactive picker
+  <leader>mC   Checkpoint manager
+  <leader>mD   Dataset explorer
+  <leader>mP   Profiler toggle
+  <leader>mE   Environment manager
+  <leader>mw   W&B toggle
+
+Python buffers (set by ftplugin/python.lua):
+  <leader>mn   Run cell under cursor
+  <leader>mN   Run all cells
+  <leader>mA   Run cells above cursor
+  ]n           Next cell
+  [n           Previous cell
+  <leader>mo   New cell below
+  <leader>mi   Interrupt kernel
+  <leader>mk   Restart kernel
+  <leader>mO   Toggle cell output
+  <F5>         Quick run (Training Monitor)
+
+All keymaps are configurable — override any in setup().
+
+==============================================================================
+8. CONFIGURATION                                           *mlbuddy-config*
+
+Full reference with defaults: >lua
+
+  require("mlbuddy").setup({
+
+    -- Global
+    border = "rounded",  -- "single"|"double"|"rounded"|"shadow"|"none"
+    width  = 84,         -- float window width
+    height = 40,         -- float window height
+
+    torchview = {
+      enabled      = true,
+      virtual_text = true,   -- inline param counts
+      auto_attach  = true,   -- attach on BufRead/Write *.py
+      show_params  = true,
+      show_shapes  = true,
+      keymaps      = { toggle = "<leader>mv", close = "q" },
+    },
+
+    mlflow = {
+      enabled          = true,
+      tracking_uri     = "http://localhost:5000",
+      refresh_interval = 5000,
+      max_runs         = 25,
+      sparkline_width  = 20,
+      keymaps = { toggle="<leader>me", refresh="R", select="<CR>", close="q" },
+    },
+
+    dataloader = {
+      enabled      = true,
+      auto_inspect = true,
+      heatmap_cols = 32,
+      heatmap_rows = 8,
+      precision    = 4,
+      keymaps = { toggle="<leader>md", inspect_word="<leader>mt", close="q" },
+    },
+
+    trainer = {
+      enabled          = true,
+      chart_width      = 60,
+      chart_height     = 16,
+      chart_series     = { "loss","val_loss","acc","val_acc" },
+      max_history      = 2000,
+      smooth_window    = 5,     -- EMA smoothing window
+      extra_patterns   = {},    -- custom { pattern, fn } parsers
+      keymaps = {
+        toggle = "<leader>mT", close="q",
+        pause_resume="p", cycle_metric="<Tab>", kill="K",
+      },
+    },
+
+    gpu = {
+      enabled          = true,
+      backend          = "auto",  -- "auto"|"nvidia"|"rocm"|"mock"
+      refresh_interval = 1000,
+      alert_vram_pct   = 90,
+      alert_temp_c     = 85,
+      statusline       = true,
+      keymaps          = { toggle="<leader>mG", close="q" },
+    },
+
+    runner = {
+      enabled         = true,
+      python          = nil,     -- nil = auto-detect
+      split_direction = "right", -- "right"|"bottom"|"tab"
+      split_size      = 55,
+      torchrun_args   = {},      -- e.g. { "--nproc_per_node=2" }
+      accelerate_args = {},
+      keymaps         = { run="<leader>mr", toggle="<leader>mR" },
+    },
+
+    checkpoint = {
+      enabled    = true,
+      scan_roots = { ".","checkpoints","outputs","runs","lightning_logs" },
+      extensions = { ".pt",".pth",".ckpt",".safetensors",".bin" },
+      deep_scan  = false,
+      keymaps    = { toggle="<leader>mC", inspect="<CR>", delete="dd", close="q" },
+    },
+
+    notebook = {
+      enabled        = true,
+      kernel_cmd     = nil,   -- nil = auto (ipython)
+      output_height  = 15,    -- max virtual output lines per cell
+      image_protocol = "auto",
+      keymaps = {
+        run_cell       = "<leader>mn",
+        run_all        = "<leader>mN",
+        run_above      = "<leader>mA",
+        next_cell      = "]n",
+        prev_cell      = "[n",
+        new_cell_below = "<leader>mo",
+        interrupt      = "<leader>mi",
+        restart        = "<leader>mk",
+        toggle_output  = "<leader>mO",
+      },
+    },
+
+    dataset  = { enabled=true, sample_size=5, keymaps={toggle="<leader>mD"} },
+    profiler = { enabled=true, top_n=20, sort_by="cuda_time",
+                 keymaps={toggle="<leader>mP", sort_cycle="s"} },
+    env      = { enabled=true, pkg_limit=30,
+                 keymaps={toggle="<leader>mE", activate="<CR>"} },
+
+    wandb = {
+      enabled          = true,
+      api_key_env      = "WANDB_API_KEY",
+      entity           = nil,   -- WANDB_ENTITY env var also works
+      project          = nil,   -- WANDB_PROJECT env var also works
+      refresh_interval = 10000,
+      max_runs         = 20,
+      keymaps          = { toggle="<leader>mw", refresh="R", close="q" },
+    },
+
+    statusline = {
+      enabled   = true,
+      show_gpu  = true,
+      show_env  = true,
+      show_job  = true,
+      update_ms = 2000,
+    },
+  })
+<
+
+==============================================================================
+9. API                                                        *mlbuddy-api*
+
+All public functions live on the `require("mlbuddy")` table.
+
+  M.setup(opts)             Setup / configure the plugin
+  M.torchview()             Toggle TorchView
+  M.mlflow()                Toggle MLflow
+  M.dataloader()            Toggle DataLoader
+  M.inspect_tensor()        Inspect word under cursor
+  M.trainer()               Toggle Trainer dashboard
+  M.train(cmd)              Launch cmd[] with Trainer monitor
+  M.gpu()                   Toggle GPU monitor
+  M.run()                   Run current .py file with monitor
+  M.runner()                Open runner interactive picker
+  M.checkpoint()            Toggle Checkpoint manager
+  M.notebook_run()          Run cell under cursor
+  M.notebook_run_all()      Run all cells
+  M.notebook_restart()      Restart kernel
+  M.notebook_interrupt()    Interrupt kernel
+  M.dataset()               Toggle Dataset explorer
+  M.profiler()              Toggle Profiler
+  M.profiler_load(path)     Load and view a trace file
+  M.env()                   Toggle Environment manager
+  M.wandb()                 Toggle W&B
+  M.dashboard()             Open multi-panel dashboard
+  M.lualine_component()     lualine component (all-in-one)
+  M.lualine_gpu()           lualine GPU component
+  M.lualine_env()           lualine env component
+  M.lualine_job()           lualine training job component
+  M.heirline_component()    heirline component
+  M.statusline_expr()       Raw %{} expression string
+  M.health()                Run health check
+
+==============================================================================
+10. HEALTH CHECK                                             *mlbuddy-health*
+
+Run either of: >
+  :checkhealth mlbuddy
+  :MlbuddyHealth
+<
+
+The health check verifies:
+  • Neovim version (≥ 0.10 required)
+  • vim.uv, vim.system availability
+  • Treesitter Python parser
+  • curl availability
+  • Python executable + torch/numpy/transformers/lightning/accelerate/datasets
+  • safetensors, IPython
+  • GPU tools (nvidia-smi / rocm-smi)
+  • torchrun / accelerate executables
+  • nvim-dap (optional)
+  • WANDB_API_KEY
+  • All 13 modules loadable
+
+==============================================================================
+11. CHANGELOG                                           *mlbuddy-changelog*
+
+v2.0.0 (enterprise)
+  + Trainer module: live 2-D ASCII charts, multi-job support, ETA
+  + GPU module: nvidia-smi / rocm-smi, alerts, statusline, background polling
+  + Runner: auto-detect Lightning/HF/Accelerate/torchrun, monitor or terminal
+  + Checkpoint manager: scan, inspect, delete, resume; safetensors support
+  + Notebook: # %% cell runner, IPython kernel, virtual-line output
+  + Dataset explorer: HF/torch/numpy introspection
+  + Profiler viewer: chrome trace JSON, top-N ops, flame bars
+  + Environment manager: venv/conda/poetry/pyenv, package list, activation
+  + W&B integration: run browser, sparklines, auto-refresh
+  + Statusline components: lualine, heirline, raw %{} support
+  + Comprehensive :checkhealth mlbuddy
+  + ftplugin/python.lua: buffer-local keymaps, `%%` insert shortcut
+  + vim help documentation
+
+v1.0.0 (initial)
+  + TorchView: Treesitter model parser + virtual text
+  + MLflow: REST client + sparklines + detail view
+  + DataLoader: tensor inspector + DAP integration + heatmap
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:
