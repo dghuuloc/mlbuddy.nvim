@@ -12,12 +12,26 @@ local NS_VIRT = vim.api.nvim_create_namespace("mlbuddy_debug_virt")
 -- ── State ─────────────────────────────────────────────────────────────────
 
 local ctx = {
-  win  = nil,
-  buf  = nil,
-  data = nil,   -- last JSON result from hook.py
-  view = "summary",
-  expr = nil,   -- last inspected expression
+  win     = nil,
+  buf     = nil,
+  data    = nil,            -- last JSON result from hook.py
+  view    = "summary",
+  expr    = nil,            -- last inspected expression
+  src_buf = nil,
+  req_id  = 0,
 }
+
+local function close_panel()
+  local guard = require("mlbuddy.guard")
+
+  if ctx.win and vim.api.nvim_win_is_valid(ctx.win) then
+    pcall(vim.api.nvim_win_close, ctx.win, true)
+  end
+
+  ctx.win = nil
+  ctx.buf = nil
+  guard.panel_closed("debugger")
+end
 
 -- ── Hook script path ──────────────────────────────────────────────────────
 
@@ -46,34 +60,84 @@ end
 
 -- ── Run hook.py ───────────────────────────────────────────────────────────
 
----@param expr   string   Python expression for the model
----@param mode   string   "full"|"activations"|"gradients"|"weights"|"nan"|"shapes"
+---@param expr string   Python expression for the model
+---@param mode string   "full"|"activations"|"gradients"|"weights"|"nan"|"shapes"
 ---@param python string
----@param cb     fun(data:table)
-local function run_hook(expr, mode, python, cb)
+---@param cfg table
+---@param cb fun(data:table)
+local function run_hook(expr, mode, python, cfg, cb)
+  if not python or python == "" then
+    vim.schedule(function()
+      cb({ error = "Python executable not found" })
+    end)
+    return
+  end
+
   local script = hook_script()
   local temp_script = false
 
   if not script then
-    -- Copy bundled script to temp file
-    local src_lines = vim.fn.readfile(
-      debug.getinfo(1,"S").source:match("^@(.+)$"):gsub("init%.lua$","") .. "hook.py")
+    local init_path = debug.getinfo(1, "S").source:match("^@(.+)$")
+    local hook_src = init_path and init_path:gsub("init%.lua$", "hook.py") or nil
+    if not hook_src or vim.fn.filereadable(hook_src) ~= 1 then
+      vim.schedule(function()
+        cb({ error = "hook.py not found" })
+      end)
+      return
+    end
+
+    local src_lines = vim.fn.readfile(hook_src)
     script = util.write_py_script(src_lines, "_mlb_debug_hook.py")
     temp_script = true
   end
 
-  local out = {}
+  local dbg_cfg = cfg.debugger or {}
+  local out, err = {}, {}
   vim.system({ python, script, expr, mode }, {
     text = true,
-    stdout = function(_, d) if d then out[#out+1] = d end end,
+    env = {
+      MLBUDDY_DUMMY_BATCH_SIZE = tostring(dbg_cfg.dummy_batch_size or 1),
+      MLBUDDY_DUMMY_SEQ_LEN = tostring(dbg_cfg.dummy_seq_len or 16),
+      MLBUDDY_DUMMY_IMAGE_SIZE = tostring(dbg_cfg.dummy_image_size or 224),
+    },
+    stdout = function(_, d) if d then out[#out + 1] = d end end,
+    stderr = function(_, d) if d then err[#err + 1] = d end end,
   }, function(r)
     if temp_script then
-      vim.fn.delete(script)
+      pcall(vim.fn.delete, script)
     end
+
     vim.schedule(function()
       local body = table.concat(out)
+      local stderr_body = table.concat(err):gsub("%s+$", "")
+
+      if r.code ~= 0 then
+        cb({
+          error = ("hook.py exited with code %d"):format(r.code),
+          stderr = stderr_body ~= "" and stderr_body or nil,
+          stdout = body ~= "" and body:sub(1, 1000) or nil,
+          expr = expr,
+          mode = mode,
+        })
+        return
+      end
+
       local data = util.json_decode(body)
-      cb(data or { error = "parse failed: " .. body:sub(1,200) })
+      if type(data) ~= "table" then
+        cb({
+          error = "parse failed: " .. body:sub(1, 300),
+          stderr = stderr_body ~= "" and stderr_body or nil,
+          stdout = body ~= "" and body:sub(1, 1000) or nil,
+          expr = expr,
+          mode = mode,
+        })
+        return
+      end
+
+      if stderr_body ~= "" then
+        data.stderr = stderr_body
+      end
+      cb(data)
     end)
   end)
 end
@@ -132,15 +196,17 @@ function M.toggle(cfg)
   local guard = require("mlbuddy.guard")
 
   if ctx.win and vim.api.nvim_win_is_valid(ctx.win) then
-    vim.api.nvim_win_close(ctx.win, true)
-    ctx.win = nil
-    guard.panel_closed("debugger")
+    -- vim.api.nvim_win_close(ctx.win, true)
+    -- ctx.win = nil
+    -- guard.panel_closed("debugger")
+    close_panel()
     return
   end
 
   if ctx.data then
     local buf, win = renderer.open(ctx.data, ctx.view, cfg)
-    ctx.buf = buf; ctx.win = win
+    ctx.buf = buf
+    ctx.win = win
     guard.panel_opened("debugger")
     M._install_keymaps(cfg)
     return
@@ -155,13 +221,24 @@ end
 ---@param mode string|nil  override mode
 function M.debug_expr(cfg, expr, mode)
   expr = expr or vim.fn.expand("<cword>")
-  mode = mode or "full"
+  mode = mode or (cfg.debugger and cfg.debugger.defult_mode) or "full"
   if expr == "" then
-    ui.warn("No model expression — position cursor on a model variable"); return
+    ui.warn("No model expression — position cursor on a model variable")
+    return
   end
 
   ctx.expr = expr
   local python = cfg.debugger and cfg.debugger.python or plat.find_python()
+  if not python or python == "" then
+    ui.warn("No Python executable found for model debugger")
+    return
+  end
+
+  ctx.req_id = ctx.req_id + 1
+  local req_id = ctx.req_id
+
+  local current_buf = vim.api.nvim_get_current_buf()
+  ctx.src_buf = vim.bo[current_buf].filetype == "python" and current_buf or nil
 
   -- Placeholder
   if ctx.buf and vim.api.nvim_buf_is_valid(ctx.buf) then
@@ -173,28 +250,64 @@ function M.debug_expr(cfg, expr, mode)
       height = cfg.height or 44,
       border = cfg.border,
     })
-    ctx.buf = buf; ctx.win = win
+    ctx.buf = buf
+    ctx.win = win
     ui.set_lines(buf, { "", "  Inspecting model '" .. expr .. "'  mode=" .. mode .. " …" })
     M._install_keymaps(cfg)
   end
 
-  run_hook(expr, mode, python, function(data)
-    ctx.data = data
-    ctx.view = "summary"
-    renderer.redraw(ctx.buf, data, ctx.view, cfg)
+  -- run_hook(expr, mode, python, function(data)
+  --   ctx.data = data
+  --   ctx.view = "summary"
+  --   renderer.redraw(ctx.buf, data, ctx.view, cfg)
+  --
+  --   -- Attach virtual text to current Python buffer
+  --   local src_buf = vim.api.nvim_get_current_buf()
+  --   if vim.bo[src_buf].filetype == "python" then
+  --     attach_virt(src_buf, data)
+  --   end
+  --
+  --   -- Notify about issues
+  --   local issues = data.issues or {}
+  --   if #issues > 0 then
+  --     ui.warn(string.format("Model '%s': %d issue%s found — check debugger panel",
+  --       expr, #issues, #issues == 1 and "" or "s"))
+  --   else
+  --     ui.info(string.format("Model '%s' looks healthy ✓", expr))
+  --   end
+  -- end)
 
-    -- Attach virtual text to current Python buffer
-    local src_buf = vim.api.nvim_get_current_buf()
-    if vim.bo[src_buf].filetype == "python" then
-      attach_virt(src_buf, data)
+  local guard = require("mlbuddy.guard")
+  guard.panel_closed("debugger")
+
+  run_hook(expr, mode, python, cfg, function(data)
+    if req_id ~= ctx.req_id then
+      return
     end
 
-    -- Notify about issues
+    ctx.data = data
+    ctx.view = "summary"
+
+    if ctx.buf and vim.api.nvim_buf_is_valid(ctx.buf) then
+      renderer.redraw(ctx.buf, data, ctx.view, cfg)
+    end
+
+    if cfg.debugger == nil or cfg.debugger.vir_text ~= false then
+      local src_buf = ctx.src_buf
+      if src_buf and vim.api.nvim_buf_is_valid(src_buf) and vim.bo[src_buf].filetype == "python" then
+        attach_virt(src_buf, data)
+      end
+    end
+
+    if data.error then
+      ui.warn(string.format("Model '%s' inspection failed: %s", expr, tostring(data.error)))
+      return
+    end
+
     local issues = data.issues or {}
     if #issues > 0 then
-      ui.warn(string.format("Model '%s': %d issue%s found — check debugger panel",
-        expr, #issues, #issues == 1 and "" or "s"))
-    else
+      ui.warn(string.format("Model '%s': %d issue%s found — check debugger panel", expr, #issues, #issues == 1 and "" or "s"))
+    elseif cfg.debugger and cfg.debugger.notify_on_success then
       ui.info(string.format("Model '%s' looks healthy ✓", expr))
     end
   end)
@@ -235,15 +348,27 @@ function M.setup_dap(cfg)
       local candidates = (cfg.debugger and cfg.debugger.model_vars)
         or { "model", "self", "net", "module" }
       local frame = session.current_frame or {}
+      local eval_req_id = ctx.req_id + 1
+      local matched = false
+
+      ctx.req_id = eval_req_id
 
       for _, var in ipairs(candidates) do
         session:request("evaluate", {
-          expression = "type(" .. var .. ").__name__",
+          expression = ("isinstance(%s, __import__('torch').nn.Module)"):format(var),
           context    = "repl",
           frameId    = frame.id,
         }, function(err, resp)
-          if not err and resp and resp.result and resp.result:match("Module") then
-            M.debug_expr(cfg, var, "full")
+          if matched or eval_req_id ~= ctx.req_id then
+            return
+          end
+
+          if not err and resp and resp.result then
+            local result = tostring(resp.result):gsub("^%s+", ""):gsub("%s+$", "")
+            if result == "True" then
+              matched = true
+              M.debug_expr(cfg, var, "full")
+            end
           end
         end)
       end
@@ -255,7 +380,7 @@ end
 
 function M._install_keymaps(cfg)
   local buf   = ctx.buf
-  local guard = require("mlbuddy.guard")
+  -- local guard = require("mlbuddy.guard")
   if not (buf and vim.api.nvim_buf_is_valid(buf)) then return end
   local km = cfg.debugger and cfg.debugger.keymaps or {}
 
@@ -265,11 +390,12 @@ function M._install_keymaps(cfg)
   end
 
   ui.map(buf, km.close or "q", function()
-    if ctx.win and vim.api.nvim_win_is_valid(ctx.win) then
-      vim.api.nvim_win_close(ctx.win, true)
-      ctx.win = nil
-      guard.panel_closed("debugger")
-    end
+    -- if ctx.win and vim.api.nvim_win_is_valid(ctx.win) then
+    --   vim.api.nvim_win_close(ctx.win, true)
+    --   ctx.win = nil
+    --   guard.panel_closed("debugger")
+    -- end
+    close_panel()
   end, "Close debugger")
 
   ui.map(buf, "1", function() switch_view("summary")     end, "Summary view")
@@ -278,21 +404,24 @@ function M._install_keymaps(cfg)
   ui.map(buf, "4", function() switch_view("weights")     end, "Weights view")
 
   ui.map(buf, "R", function()
-    if ctx.expr then M.debug_expr(cfg, ctx.expr, "full")
-    else ui.warn("No expression stored — use :MlbuddyDebug <expr>") end
+    if ctx.expr then
+      M.debug_expr(cfg, ctx.expr, (cfg.debugger and cfg.debugger.default_mode) or "full")
+    else
+      ui.warn("No expression stored — use :MlbuddyDebug <expr>")
+    end
   end, "Re-run hook")
 
   ui.map(buf, "e", function()
-    vim.ui.input({ prompt="Model expression: ", default=ctx.expr or "model" }, function(s)
+    vim.ui.input({ prompt = "Model expression: ", default = ctx.expr or "model" }, function(s)
       if s and s ~= "" then M.debug_expr(cfg, s, "full") end
     end)
   end, "Change expression")
 
   vim.api.nvim_create_autocmd("WinClosed", {
-    buffer=buf, once=true,
-    callback=function()
-      ctx.win = nil
-      guard.panel_closed("debugger")
+    buffer = buf,
+    once = true,
+    callback = function()
+      close_panel()
     end,
   })
 end
@@ -318,10 +447,13 @@ function M.setup_autocmds(cfg)
   -- regular Python debugging sessions)
   if cfg.debugger and cfg.debugger.auto_inspect then
     local function register() M.setup_dap(cfg) end
-    if package.loaded["dap"] then register()
+    if package.loaded["dap"] then
+      register()
     else
       vim.api.nvim_create_autocmd("User", {
-        group=ag, pattern="DapAttach", once=false,
+        group=ag,
+        pattern="DapAttach",
+        once=false,
         callback=register,
       })
     end

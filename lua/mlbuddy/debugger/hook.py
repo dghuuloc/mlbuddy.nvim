@@ -8,134 +8,213 @@ Usage (from Lua via vim.system):
 mode = "activations" | "gradients" | "shapes" | "weights" | "nan" | "full"
 expr = Python expression that evaluates to an nn.Module
 """
-import sys, json, math
+import inspect
+import json
+import math
+import os
+import sys
+import traceback
 
 expr = sys.argv[1] if len(sys.argv) > 1 else "model"
 mode = sys.argv[2] if len(sys.argv) > 2 else "full"
 
+DUMMY_BATCH_SIZE = int(os.getenv("MLBUDDY_DUMMY_BATCH_SIZE", "1"))
+DUMMY_SEQ_LEN = int(os.getenv("MLBUDDY_DUMMY_SEQ_LEN", "16"))
+DUMMY_IMAGE_SIZE = int(os.getenv("MLBUDDY_DUMMY_IMAGE_SIZE", "224"))
+
 result = {
-    "expr":   expr,
-    "mode":   mode,
+    "expr": expr,
+    "mode": mode,
     "layers": [],
     "issues": [],
-    "error":  None,
+    "notes": [],
+    "error": None,
 }
 
+
 def safe(v):
-    """Convert tensor stat to a plain Python float, handling NaN/Inf."""
     try:
         f = float(v)
-        if math.isnan(f): return "nan"
-        if math.isinf(f): return "inf" if f > 0 else "-inf"
+        if math.isnan(f):
+            return "nan"
+        if math.isinf(f):
+            return "inf" if f > 0 else "-inf"
         return round(f, 6)
     except Exception:
         return None
 
-def tensor_stats(t, name=""):
-    """Return a dict of statistics for a single tensor."""
+
+def tensor_stats(t):
     import torch
+
     if not isinstance(t, torch.Tensor):
         return None
-    t = t.detach().float()
-    n    = t.numel()
-    flat = t.reshape(-1)
+    base = t.detach()
+    work = base.float()
+    n = work.numel()
+    flat = work.reshape(-1)
     s = {
-        "shape":     list(t.shape),
-        "dtype":     str(t.dtype).replace("torch.", ""),
-        "numel":     n,
-        "mean":      safe(t.mean()),
-        "std":       safe(t.std()) if n > 1 else 0.0,
-        "min":       safe(t.min()),
-        "max":       safe(t.max()),
-        "norm":      safe(t.norm()),
-        "has_nan":   bool(torch.isnan(t).any()),
-        "has_inf":   bool(torch.isinf(t).any()),
+        "shape": list(base.shape),
+        "dtype": str(base.dtype).replace("torch.", ""),
+        "device": str(base.device),
+        "numel": n,
+        "mean": safe(work.mean()) if n > 0 else None,
+        "std": safe(work.std()) if n > 1 else 0.0,
+        "min": safe(work.min()) if n > 0 else None,
+        "max": safe(work.max()) if n > 0 else None,
+        "norm": safe(work.norm()) if n > 0 else None,
+        "has_nan": bool(torch.isnan(work).any()) if n > 0 else False,
+        "has_inf": bool(torch.isinf(work).any()) if n > 0 else False,
         "zeros_pct": round(float((flat == 0).sum()) / n * 100, 2) if n > 0 else 0,
-        "neg_pct":   round(float((flat < 0).sum())  / n * 100, 2) if n > 0 else 0,
+        "neg_pct": round(float((flat < 0).sum()) / n * 100, 2) if n > 0 else 0,
     }
-    # Gradient norm (for weight analysis)
-    if hasattr(t, "grad") and t.grad is not None:
-        g = t.grad.detach().float()
+    if hasattr(base, "grad") and base.grad is not None:
+        g = base.grad.detach().float()
         s["grad_norm"] = safe(g.norm())
-        s["grad_max"]  = safe(g.abs().max())
+        s["grad_max"] = safe(g.abs().max())
         s["grad_has_nan"] = bool(torch.isnan(g).any())
     return s
+
+
+def short_traceback(exc):
+    tb = traceback.format_exc().strip()
+    return "\n".join(tb.splitlines()[-20:]) or str(exc)
+
+
+def infer_device(model):
+    import torch
+
+    for p in model.parameters():
+      return p.device
+    for b in model.buffers():
+      return b.device
+    return torch.device("cpu")
+
+
+def dummy_from_signature(model, device):
+    import torch
+    import torch.nn as nn
+
+    for _, module in model.named_modules():
+        if isinstance(module, nn.Conv2d):
+            return torch.zeros(DUMMY_BATCH_SIZE, module.in_channels, DUMMY_IMAGE_SIZE, DUMMY_IMAGE_SIZE, device=device)
+        if isinstance(module, nn.Conv1d):
+            return torch.zeros(DUMMY_BATCH_SIZE, module.in_channels, DUMMY_SEQ_LEN, device=device)
+        if isinstance(module, nn.Conv3d):
+            return torch.zeros(DUMMY_BATCH_SIZE, module.in_channels, 8, 8, 8, device=device)
+        if isinstance(module, nn.Linear):
+            return torch.zeros(DUMMY_BATCH_SIZE, module.in_features, device=device)
+        if isinstance(module, nn.Embedding):
+            return torch.zeros(DUMMY_BATCH_SIZE, DUMMY_SEQ_LEN, dtype=torch.long, device=device)
+
+    try:
+        sig = inspect.signature(model.forward)
+        params = list(sig.parameters.values())[1:]
+        if len(params) == 1:
+            return torch.zeros(DUMMY_BATCH_SIZE, 3, DUMMY_IMAGE_SIZE, DUMMY_IMAGE_SIZE, device=device)
+    except Exception:
+        pass
+
+    return None
+
+
+def run_forward(model):
+    import torch
+
+    dummy = dummy_from_signature(model, infer_device(model))
+    if dummy is None:
+        result["notes"].append(
+            "Could not infer a safe dummy input. Forward activations may be unavailable for multi-input or highly custom models."
+        )
+        return None
+
+    model.eval()
+    with torch.no_grad():
+        return model(dummy)
+
 
 try:
     import torch
     import torch.nn as nn
 
-    # Try to get the model from the expression
-    # We try importing common names first
     globs = {"torch": torch, "nn": nn}
     try:
         import torchvision.models as tvm
         globs["tvm"] = tvm
-    except ImportError:
+    except Exception:
         pass
     try:
         import transformers
         globs["transformers"] = transformers
-    except ImportError:
+    except Exception:
         pass
 
-    model = eval(expr, globs)
+    try:
+        model = eval(expr, globs)
+    except Exception as exc:
+        result["error"] = (
+            f"Could not evaluate expression '{expr}' in the helper Python process: {exc}. "
+            "If this symbol only exists in the paused DAP frame, the standalone hook process cannot access it. "
+            "Use an importable expression or construct the model in a normal Python module scope."
+        )
+        result["traceback"] = short_traceback(exc)
+        print(json.dumps(result))
+        sys.exit(0)
 
     if not isinstance(model, nn.Module):
         result["error"] = f"'{expr}' is not an nn.Module (got {type(model).__name__})"
-        print(json.dumps(result)); sys.exit(0)
+        print(json.dumps(result))
+        sys.exit(0)
 
     result["model_class"] = type(model).__name__
+    result["device"] = str(infer_device(model))
 
-    # ── 1. Weight statistics ──────────────────────────────────────────────────
     if mode in ("weights", "full"):
         for name, module in model.named_modules():
             if not list(module.parameters(recurse=False)):
                 continue
             layer_info = {
-                "name":   name or type(module).__name__,
-                "type":   type(module).__name__,
+                "name": name or type(module).__name__,
+                "type": type(module).__name__,
                 "params": {},
             }
             for pname, param in module.named_parameters(recurse=False):
                 s = tensor_stats(param)
-                if s:
-                    # Detect weight issues
-                    issues = []
-                    if s["has_nan"]:
-                        issues.append("NaN in weights")
-                        result["issues"].append(f"{name}.{pname}: NaN weights")
-                    if s["has_inf"]:
-                        issues.append("Inf in weights")
-                        result["issues"].append(f"{name}.{pname}: Inf weights")
-                    if s.get("std") is not None and isinstance(s["std"], float):
-                        if s["std"] < 1e-7:
-                            issues.append("dead weights (std≈0)")
-                            result["issues"].append(f"{name}.{pname}: dead weights (std={s['std']:.2e})")
-                        if s["std"] > 100:
-                            issues.append("exploding weights")
-                            result["issues"].append(f"{name}.{pname}: large weights (std={s['std']:.2e})")
-                    s["issues"] = issues
-                    layer_info["params"][pname] = s
+                if not s:
+                    continue
+                issues = []
+                if s["has_nan"]:
+                    issues.append("NaN in weights")
+                    result["issues"].append(f"{name}.{pname}: NaN weights")
+                if s["has_inf"]:
+                    issues.append("Inf in weights")
+                    result["issues"].append(f"{name}.{pname}: Inf weights")
+                if isinstance(s.get("std"), float):
+                    if s["std"] < 1e-7:
+                        issues.append("dead weights (std≈0)")
+                        result["issues"].append(f"{name}.{pname}: dead weights (std={s['std']:.2e})")
+                    if s["std"] > 100:
+                        issues.append("exploding weights")
+                        result["issues"].append(f"{name}.{pname}: large weights (std={s['std']:.2e})")
+                s["issues"] = issues
+                layer_info["params"][pname] = s
             result["layers"].append(layer_info)
 
-    # ── 2. Forward hook – capture activation shapes + stats ───────────────────
     if mode in ("activations", "shapes", "nan", "full"):
-        hooks      = []
+        hooks = []
         activations = {}
 
         def make_hook(name):
             def hook(module, inp, out):
                 if isinstance(out, torch.Tensor):
                     activations[name] = {
-                        "output": tensor_stats(out, name),
-                        "input":  tensor_stats(inp[0], name) if inp and isinstance(inp[0], torch.Tensor) else None,
+                        "output": tensor_stats(out),
+                        "input": tensor_stats(inp[0]) if inp and isinstance(inp[0], torch.Tensor) else None,
                     }
                 elif isinstance(out, (tuple, list)):
-                    # e.g. LSTM returns (output, (h, c))
                     for i, o in enumerate(out):
                         if isinstance(o, torch.Tensor):
-                            activations[f"{name}[{i}]"] = {"output": tensor_stats(o, name), "input": None}
+                            activations[f"{name}[{i}]"] = {"output": tensor_stats(o), "input": None}
                             break
             return hook
 
@@ -151,60 +230,47 @@ try:
             )):
                 hooks.append(module.register_forward_hook(make_hook(name or type(module).__name__)))
 
-        # Build a dummy input to run a forward pass
         try:
-            # Try to infer input shape from first Conv or Linear layer
-            dummy = None
-            for name, module in model.named_modules():
-                if isinstance(module, nn.Conv2d):
-                    c = module.in_channels
-                    dummy = torch.zeros(1, c, 224, 224)
-                    break
-                elif isinstance(module, nn.Linear):
-                    dummy = torch.zeros(1, module.in_features)
-                    break
-                elif isinstance(module, nn.Embedding):
-                    dummy = torch.zeros(1, 16, dtype=torch.long)
-                    break
+            try:
+                _ = run_forward(model)
+            except Exception as exc:
+                result["forward_error"] = str(exc)
+                result["traceback"] = short_traceback(exc)
+                result["notes"].append(
+                    "Forward pass failed while running a generated dummy input. This often happens for multi-input models, token/mask based models, or device-sensitive code."
+                )
 
-            if dummy is not None:
-                model.eval()
-                with torch.no_grad():
-                    try:
-                        _ = model(dummy)
-                    except Exception as fwd_err:
-                        result["forward_error"] = str(fwd_err)
-
-                # Merge activation info into layers list
-                for act_name, act_data in activations.items():
-                    out_stat = act_data.get("output")
-                    if out_stat:
-                        # Mark NaN activations as issues
-                        if out_stat.get("has_nan"):
-                            result["issues"].append(f"{act_name}: NaN in activations")
-                        if out_stat.get("has_inf"):
-                            result["issues"].append(f"{act_name}: Inf in activations")
-                        # Dead neuron detection (ReLU with >80% zeros)
-                        if out_stat.get("zeros_pct", 0) > 80:
-                            result["issues"].append(
-                                f"{act_name}: {out_stat['zeros_pct']:.0f}% dead neurons (zeros)")
-                        # Append to result
-                        result["layers"].append({
-                            "name":       act_name,
-                            "type":       "activation",
-                            "activation": out_stat,
-                        })
-        except Exception as run_err:
-            result["run_error"] = str(run_err)
+            for act_name, act_data in activations.items():
+                out_stat = act_data.get("output")
+                if not out_stat:
+                    continue
+                if out_stat.get("has_nan"):
+                    result["issues"].append(f"{act_name}: NaN in activations")
+                if out_stat.get("has_inf"):
+                    result["issues"].append(f"{act_name}: Inf in activations")
+                if out_stat.get("zeros_pct", 0) > 80:
+                    result["issues"].append(f"{act_name}: {out_stat['zeros_pct']:.0f}% dead neurons (zeros)")
+                result["layers"].append({
+                    "name": act_name,
+                    "type": "activation",
+                    "activation": out_stat,
+                })
+        except Exception as exc:
+            result["run_error"] = str(exc)
+            result["traceback"] = short_traceback(exc)
         finally:
             for h in hooks:
-                h.remove()
+                try:
+                    h.remove()
+                except Exception:
+                    pass
 
-    # ── 3. Gradient flow ──────────────────────────────────────────────────────
     if mode in ("gradients", "full"):
         grad_layers = []
+        any_grad = False
         for name, param in model.named_parameters():
             if param.grad is not None:
+                any_grad = True
                 gn = float(param.grad.norm())
                 issues = []
                 if math.isnan(gn):
@@ -217,20 +283,23 @@ try:
                     issues.append("exploding gradient")
                     result["issues"].append(f"{name}: exploding gradient (norm={gn:.2e})")
                 grad_layers.append({
-                    "name":      name,
+                    "name": name,
                     "grad_norm": round(gn, 6),
-                    "grad_max":  safe(param.grad.abs().max()),
-                    "issues":    issues,
+                    "grad_max": safe(param.grad.abs().max()),
+                    "issues": issues,
                 })
         if grad_layers:
             result["gradient_flow"] = grad_layers
+        elif mode in ("gradients", "full"):
+            result["notes"].append(
+                "No gradients were present on model parameters. This helper does not run a real training step, so gradient flow is only visible when the provided model already has .grad values."
+            )
 
     result["total_params"] = sum(p.numel() for p in model.parameters())
     result["trainable_params"] = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-except Exception as e:
-    import traceback
-    result["error"] = str(e)
-    result["traceback"] = traceback.format_exc()
+except Exception as exc:
+    result["error"] = str(exc)
+    result["traceback"] = short_traceback(exc)
 
 print(json.dumps(result))

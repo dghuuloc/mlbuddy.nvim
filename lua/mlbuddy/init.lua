@@ -163,7 +163,9 @@ function M.notebook_toggle_output()  require("mlbuddy.notebook").toggle_output(c
 
 --- Launch a command with the trainer monitor.
 ---@param cmd string[]
-function M.train(cmd)         require("mlbuddy.trainer").launch(cmd, cfg())                  end
+function M.train(cmd)
+    require("mlbuddy.trainer").launch(cmd, cfg())
+end
 
 --- Open all panels in a tiled layout (best on wide monitors).
 function M.dashboard()
@@ -178,21 +180,35 @@ end
 
 --- For lualine:
 ---   sections = { lualine_x = { require("mlbuddy").lualine_component() } }
-function M.lualine_component()    return require("mlbuddy.statusline").lualine_component() end
-function M.lualine_gpu()          return require("mlbuddy.statusline").lualine_gpu()       end
-function M.lualine_env()          return require("mlbuddy.statusline").lualine_env()       end
-function M.lualine_job()          return require("mlbuddy.statusline").lualine_job()       end
+function M.lualine_component()
+    return require("mlbuddy.statusline").lualine_component()
+end
+function M.lualine_gpu()
+    return require("mlbuddy.statusline").lualine_gpu()
+end
+function M.lualine_env()
+    return require("mlbuddy.statusline").lualine_env()
+end
+function M.lualine_job()
+    return require("mlbuddy.statusline").lualine_job()
+end
 
 --- For heirline:
 ---   { require("mlbuddy").heirline_component() }
-function M.heirline_component()   return require("mlbuddy.statusline").heirline_component() end
+function M.heirline_component()
+    return require("mlbuddy.statusline").heirline_component()
+end
 
 --- For plain %{} statusline:
 ---   vim.opt.statusline = ... .. require("mlbuddy").statusline_expr()
-function M.statusline_expr()      return require("mlbuddy.statusline").raw_expr()          end
+function M.statusline_expr()
+    return require("mlbuddy.statusline").raw_expr()
+end
 
 -- ── Health check ──────────────────────────────────────────────────────────────
 
-function M.health() require("mlbuddy.health").check() end
+function M.health()
+    require("mlbuddy.health").check()
+end
 
 return M
