@@ -77,20 +77,12 @@ print(json.dumps(result))
 
 -- ── Python evaluation ─────────────────────────────────────────────────────────
 
---- Write helper script to a temp file.
----@return string path
-local function get_script()
-  local tmp = vim.fn.tempname() .. "_mlbuddy_inspect.py"
-  vim.fn.writefile(vim.split(INSPECT_PY, "\n"), tmp)
-  return tmp
-end
-
 --- Inspect a Python expression in the given virtual env / interpreter.
 ---@param expr    string    Python expression to evaluate
----@param python  string    Python executable (e.g. "python3")
+---@param python  string    Python executable
 ---@param cb      fun(info: TensorInfo|nil)
 local function inspect_expr(expr, python, cb)
-  local script = get_script()
+  local script = require("mlbuddy.util").write_py_script(INSPECT_PY, "_mlbuddy_inspect.py")
   local out    = {}
 
   vim.system(
@@ -117,72 +109,76 @@ end
 -- ── DAP integration ───────────────────────────────────────────────────────────
 
 --- Hook into nvim-dap to auto-inspect tensors at breakpoints.
+--- Only fires when the DataLoader panel is already open AND
+--- the session is debugging an ML file.
 ---@param cfg table
 local function setup_dap_hooks(cfg)
-  local ok, dap = pcall(require, "dap")
-  if not ok then return end
+  local guard = require("mlbuddy.guard")
 
-  -- When DAP stops (breakpoint / step), grab the REPL evaluation
-  dap.listeners.after.event_stopped["mlbuddy_dataloader"] = function(session, body)
-    if not cfg.dataloader.auto_inspect then return end
-    if not (ctx.win and vim.api.nvim_win_is_valid(ctx.win)) then return end
+  guard.register_dap_listener(
+    "mlbuddy_dataloader",
+    cfg,
+    cfg.dataloader.auto_inspect,  -- must be explicitly true
+    "dataloader",                 -- panel must be open
+    function(session, _)
+      -- Extra check: panel window must still be valid
+      if not (ctx.win and vim.api.nvim_win_is_valid(ctx.win)) then return end
 
-    -- Get word under cursor (most likely a tensor variable)
-    local word = vim.fn.expand("<cword>")
-    if word == "" then return end
+      local word = vim.fn.expand("<cword>")
+      if word == "" then return end
 
-    -- Use DAP's evaluate request to inspect in the current frame
-    local frame = session.current_frame or {}
-    session:request("evaluate", {
-      expression  = string.format(
-        "__import__('json').dumps({'shape': list(%s.shape), 'dtype': str(%s.dtype), "
-        .. "'min': float(%s.min()), 'max': float(%s.max()), "
-        .. "'mean': float(%s.mean()), 'std': float(%s.std()), "
-        .. "'has_nan': bool(__import__('torch').isnan(%s).any()), "
-        .. "'has_inf': bool(__import__('torch').isinf(%s).any()), "
-        .. "'values': %s.detach().cpu().flatten()[:2048].tolist()})",
-        word, word, word, word, word, word, word, word, word
-      ),
-      context     = "repl",
-      frameId     = frame.id,
-    }, function(err, response)
-      if err or not (response and response.result) then return end
-
-      -- DAP returns the JSON as a Python string repr; strip outer quotes
-      local raw = response.result:gsub('^"', ""):gsub('"$', ""):gsub('\\"', '"')
-      local d   = require("mlbuddy.util").json_decode(raw)
-      if not d then return end
-
-      d.name   = word
-      d.source = "DAP"
-      ctx.tensors = { d }
-
-      if ctx.buf and vim.api.nvim_buf_is_valid(ctx.buf) then
-        renderer.redraw(ctx.buf, ctx.tensors, cfg)
-      end
-    end)
-  end
+      local frame = session.current_frame or {}
+      session:request("evaluate", {
+        expression = string.format(
+          "__import__('json').dumps({'shape': list(%s.shape), 'dtype': str(%s.dtype), "
+          .. "'min': float(%s.min()), 'max': float(%s.max()), "
+          .. "'mean': float(%s.mean()), 'std': float(%s.std()), "
+          .. "'has_nan': bool(__import__('torch').isnan(%s).any()), "
+          .. "'has_inf': bool(__import__('torch').isinf(%s).any()), "
+          .. "'values': %s.detach().cpu().flatten()[:2048].tolist()})",
+          word, word, word, word, word, word, word, word, word
+        ),
+        context = "repl",
+        frameId = frame.id,
+      }, function(err, response)
+        if err or not (response and response.result) then return end
+        local raw = response.result:gsub('^"',""):gsub('"$',""):gsub('\\"','"')
+        local d   = require("mlbuddy.util").json_decode(raw)
+        if not d then return end
+        d.name = word; d.source = "DAP"
+        ctx.tensors = { d }
+        if ctx.buf and vim.api.nvim_buf_is_valid(ctx.buf) then
+          renderer.redraw(ctx.buf, ctx.tensors, cfg)
+        end
+      end)
+    end
+  )
 end
 
 -- ── Toggle ────────────────────────────────────────────────────────────────────
 
 ---@param cfg table
 function M.toggle(cfg)
+  local guard = require("mlbuddy.guard")
+
   if ctx.win and vim.api.nvim_win_is_valid(ctx.win) then
     vim.api.nvim_win_close(ctx.win, true)
     ctx.win = nil
+    guard.panel_closed("dataloader")
     return
   end
 
   local buf, win = renderer.open(ctx.tensors, cfg)
   ctx.buf = buf
   ctx.win = win
+  guard.panel_opened("dataloader")
 
   local km = cfg.dataloader.keymaps
   ui.map(buf, km.close or "q", function()
     if vim.api.nvim_win_is_valid(win) then
       vim.api.nvim_win_close(win, true)
       ctx.win = nil
+      guard.panel_closed("dataloader")
     end
   end, "Close DataLoader panel")
 
@@ -192,7 +188,6 @@ function M.toggle(cfg)
 
   ui.map(buf, "<Tab>", function()
     if #ctx.tensors == 0 then return end
-    -- Rotate tensor list
     local first = table.remove(ctx.tensors, 1)
     ctx.tensors[#ctx.tensors + 1] = first
     renderer.redraw(buf, ctx.tensors, cfg)
@@ -201,13 +196,15 @@ function M.toggle(cfg)
   vim.api.nvim_create_autocmd("WinClosed", {
     buffer  = buf,
     once    = true,
-    callback = function() ctx.win = nil end,
+    callback = function()
+      ctx.win = nil
+      guard.panel_closed("dataloader")
+    end,
   })
 end
 
 -- ── Cursor-word inspect ───────────────────────────────────────────────────────
 
---- Inspect the expression under the cursor using a Python subprocess.
 ---@param cfg table
 function M.inspect_cursor(cfg)
   local word = vim.fn.expand("<cword>")
@@ -216,16 +213,11 @@ function M.inspect_cursor(cfg)
     return
   end
 
-  -- Detect virtualenv python
-  local python = vim.fn.exepath("python3") ~= "" and "python3" or "python"
-  local venv_py = vim.fn.getcwd() .. "/.venv/bin/python"
-  if vim.fn.executable(venv_py) == 1 then python = venv_py end
-
+  local python = require("mlbuddy.platform").find_python()
   vim.notify("[mlbuddy] Inspecting: " .. word, vim.log.levels.INFO)
 
   inspect_expr(word, python, function(info)
     if not info then return end
-    -- Prepend to tensor list
     table.insert(ctx.tensors, 1, info)
     if #ctx.tensors > 8 then table.remove(ctx.tensors) end
 
@@ -241,16 +233,32 @@ end
 
 ---@param cfg table
 function M.setup_autocmds(cfg)
+  local ag = vim.api.nvim_create_augroup("MlbuddyDataLoader", { clear = true })
+
+  -- Clean up guard cache on buffer delete
+  vim.api.nvim_create_autocmd("BufDelete", {
+    group   = ag,
+    pattern = "*.py",
+    callback = function(ev)
+      require("mlbuddy.guard").clear_cache(ev.buf)
+    end,
+  })
+
+  -- Only register DAP hooks if auto_inspect is explicitly enabled.
+  -- With auto_inspect=false (default), mlbuddy never touches DAP sessions.
   if cfg.dataloader.auto_inspect then
-    -- Lazy-setup DAP hooks once DAP is actually loaded
+    local function register()
+      setup_dap_hooks(cfg)
+    end
+    -- Wait for DapAttach so we don't pollute the dap.listeners table at startup
     vim.api.nvim_create_autocmd("User", {
-      pattern  = "DapAttach",
-      once     = false,
-      callback = function() setup_dap_hooks(cfg) end,
-      group    = vim.api.nvim_create_augroup("MlbuddyDataLoader", { clear = true }),
+      group   = ag,
+      pattern = "DapAttach",
+      once    = false,
+      callback = register,
     })
-    -- Also try immediately if DAP is already loaded
-    if package.loaded["dap"] then setup_dap_hooks(cfg) end
+    -- Also register if DAP is already loaded
+    if package.loaded["dap"] then register() end
   end
 end
 

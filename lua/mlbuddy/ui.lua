@@ -94,7 +94,10 @@ function M.terminal_split(cmd, opts)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_win_set_buf(win, buf)
 
-  vim.fn.termopen(cmd, {
+  -- On Windows wrap command so termopen can launch it
+  local launch_cmd = require("mlbuddy.platform").term_cmd(cmd)
+
+  vim.fn.termopen(launch_cmd, {
     on_exit = function(_, code)
       vim.schedule(function()
         if vim.api.nvim_buf_is_valid(buf) then

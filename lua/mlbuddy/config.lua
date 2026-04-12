@@ -16,6 +16,8 @@ M.defaults = {
     gpu      = "󰊗", vram     = "󰍛", temp     = "󰔅", util     = "󰓿",
     ckpt     = "󰆓", dataset  = "󰙬", notebook = "󰠮", profiler = "󰅱",
     env      = "󰢱", train    = "󱘖", runner   = "󰐊", wandb    = "󰒊",
+    debugger = "󰃤",
+    quarto   = "󰗚",
     spinner  = { "⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏" },
     progress = { "▏","▎","▍","▌","▋","▊","▉","█" },
   },
@@ -44,7 +46,10 @@ M.defaults = {
   -- ── DataLoader ───────────────────────────────────────────────────────────
   dataloader = {
     enabled      = true,
-    auto_inspect = true,
+    -- auto_inspect: ONLY inspect when the DataLoader panel is already open.
+    -- Set to true only if you want automatic tensor inspection on every DAP
+    -- breakpoint stop. Default false so normal Python debugging is unaffected.
+    auto_inspect = false,
     heatmap_cols = 32,
     heatmap_rows = 8,
     precision    = 4,
@@ -177,8 +182,61 @@ M.defaults = {
     enabled       = true,
     show_gpu      = true,
     show_env      = true,
-    show_job      = true,   -- active training job
+    show_job      = true,
     update_ms     = 2000,
+  },
+
+  -- ── Model Debugger ────────────────────────────────────────────────────────
+  debugger = {
+    enabled       = true,
+    python        = nil,
+    auto_inspect  = false,
+    model_vars    = { "model", "self", "net", "module" },
+    default_mode  = "full",
+    keymaps = {
+      toggle      = "<leader>mdb",
+      debug_expr  = "<leader>mdi",
+      check_nan   = "<leader>mdn",
+      gradients   = "<leader>mdg",
+      close       = "q",
+    },
+  },
+
+  -- ── Quarto Integration ────────────────────────────────────────────────────
+  quarto = {
+    enabled      = true,
+    -- runner mode:
+    --   "auto"    use quarto-nvim's runner if available, else mlbuddy IPython kernel
+    --   "mlbuddy" always use mlbuddy's own IPython kernel
+    --   "quarto"  always delegate to quarto-nvim (molten/slime/iron)
+    runner       = "auto",
+    python       = nil,          -- nil = auto-detect
+    kernel_cmd   = nil,          -- nil = auto (ipython)
+    output_height = 12,          -- virtual output lines per cell
+    torchview_virt = true,       -- show param counts on model-definition cells
+    auto_trainer   = true,       -- open Trainer dashboard for training-loop cells
+    close_preview_on_exit = true,
+    prefer_quarto_nvim = false,  -- if true, use quartoPreview instead of mlbuddy's
+    keymaps = {
+      run_cell      = "<leader>qr",
+      run_all       = "<leader>qR",
+      run_above     = "<leader>qa",
+      train_cell    = "<leader>qT",
+      toggle_output = "<leader>qo",
+      clear_output  = "<leader>qO",
+      interrupt     = "<leader>qi",
+      restart       = "<leader>qk",
+      insert_cell   = "<leader>qn",
+      preview       = "<leader>qp",
+      close_preview = "<leader>qP",
+      open_browser  = "<leader>qb",
+      render        = "<leader>qB",
+      render_html   = "<leader>qH",
+      render_pdf    = "<leader>qF",
+      inspect_tensor = "<leader>qt",
+      torchview     = "<leader>qv",
+      debug         = "<leader>qd",
+    },
   },
 }
 

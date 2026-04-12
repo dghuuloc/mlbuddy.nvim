@@ -11,6 +11,17 @@ if vim.fn.has("nvim-0.10") == 0 then
   return
 end
 
+-- Log OS at startup (debug aid)
+local plat = require("mlbuddy.platform")
+if plat.is_win then
+  -- Silently confirm Windows mode is active; shows in :MlbuddyHealth
+  vim.g.mlbuddy_os = "windows"
+elseif plat.is_mac then
+  vim.g.mlbuddy_os = "macos"
+else
+  vim.g.mlbuddy_os = "linux"
+end
+
 local function m() return require("mlbuddy") end
 local function cfg() return m()._cfg or require("mlbuddy.config").defaults end
 
@@ -124,7 +135,52 @@ vim.api.nvim_create_user_command("MlbuddyDashboard",
   function() m().dashboard() end,
   { desc = "mlbuddy: open TorchView + Trainer + GPU side by side" })
 
--- ── Health ────────────────────────────────────────────────────────────────────
+-- ── Model Debugger ────────────────────────────────────────────────────────────
+
+vim.api.nvim_create_user_command("MlbuddyDebug",
+  function(opts)
+    local expr = opts.args ~= "" and opts.args or nil
+    m().debug(expr, "full")
+  end,
+  { nargs="?", desc="mlbuddy: debug model (activations, gradients, weights, NaN)" })
+
+vim.api.nvim_create_user_command("MlbuddyDebugNaN",
+  function() m().debug_nan() end,
+  { desc="mlbuddy: quick NaN/Inf check on model under cursor" })
+
+vim.api.nvim_create_user_command("MlbuddyDebugGradients",
+  function() m().debug_gradients() end,
+  { desc="mlbuddy: show gradient flow for model under cursor" })
+
+-- ── Quarto Integration ────────────────────────────────────────────────────────
+
+vim.api.nvim_create_user_command("MlbuddyQuartoRun",
+  function() m().quarto_run() end,
+  { desc="mlbuddy: run Quarto cell under cursor" })
+
+vim.api.nvim_create_user_command("MlbuddyQuartoRunAll",
+  function() m().quarto_run_all() end,
+  { desc="mlbuddy: run all Quarto Python cells" })
+
+vim.api.nvim_create_user_command("MlbuddyQuartoTrain",
+  function() m().quarto_train() end,
+  { desc="mlbuddy: run Quarto training cell with Training Monitor" })
+
+vim.api.nvim_create_user_command("MlbuddyQuartoPreview",
+  function() m().quarto_preview() end,
+  { desc="mlbuddy: start quarto preview" })
+
+vim.api.nvim_create_user_command("MlbuddyQuartoRender",
+  function(opts) m().quarto_render(opts.args ~= "" and opts.args or nil) end,
+  { nargs="?", desc="mlbuddy: quarto render [format]" })
+
+vim.api.nvim_create_user_command("MlbuddyQuartoTorchView",
+  function() m().quarto_torchview() end,
+  { desc="mlbuddy: TorchView for model in Quarto cell" })
+
+vim.api.nvim_create_user_command("MlbuddyQuartoDebug",
+  function() m().quarto_debug() end,
+  { desc="mlbuddy: debug model in Quarto cell" })
 
 vim.api.nvim_create_user_command("MlbuddyHealth",
   function() m().health() end,

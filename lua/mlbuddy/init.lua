@@ -20,6 +20,7 @@
 
 local config = require("mlbuddy.config")
 local ui     = require("mlbuddy.ui")
+local plat   = require("mlbuddy.platform")
 local M      = {}
 
 --- Resolved config (set by setup()).
@@ -43,6 +44,12 @@ function M.setup(opts)
   end
   if cfg.notebook.enabled then
     require("mlbuddy.notebook").setup_autocmds(cfg)
+  end
+  if cfg.debugger and cfg.debugger.enabled then
+    require("mlbuddy.debugger").setup_autocmds(cfg)
+  end
+  if cfg.quarto and cfg.quarto.enabled then
+    require("mlbuddy.quarto").setup_autocmds(cfg)
   end
   if cfg.statusline.enabled then
     require("mlbuddy.statusline").setup(cfg)
@@ -99,8 +106,12 @@ function M.setup(opts)
   -- Env
   nmap(cfg.env.keymaps.toggle,              function() M.env()            end, "Env manager")
 
-  -- W&B
-  nmap(cfg.wandb.keymaps.toggle,            function() M.wandb()          end, "W&B toggle")
+  -- Debugger
+  local dbg_km = cfg.debugger and cfg.debugger.keymaps or {}
+  nmap(dbg_km.toggle     or "<leader>mdb", function() M.debugger()        end, "Model Debugger toggle")
+  nmap(dbg_km.debug_expr or "<leader>mdi", function() M.debug_model()     end, "Debug model under cursor")
+  nmap(dbg_km.check_nan  or "<leader>mdn", function() M.debug_nan()       end, "Check NaN in model")
+  nmap(dbg_km.gradients  or "<leader>mdg", function() M.debug_gradients() end, "Gradient flow")
 end
 
 -- ── Public module toggles ─────────────────────────────────────────────────────
@@ -121,6 +132,23 @@ function M.profiler()         require("mlbuddy.profiler").toggle(cfg())         
 function M.profiler_load(p)   require("mlbuddy.profiler").load(p, cfg())                     end
 function M.env()              require("mlbuddy.env").toggle(cfg())                           end
 function M.wandb()            require("mlbuddy.wandb").toggle(cfg())                         end
+
+-- Debugger
+function M.debugger()         require("mlbuddy.debugger").toggle(cfg())                       end
+function M.debug_model()      require("mlbuddy.debugger").debug_cursor(cfg())                 end
+function M.debug_nan()        require("mlbuddy.debugger").check_nan(cfg())                    end
+function M.debug_gradients()  require("mlbuddy.debugger").debug_gradients(cfg())              end
+function M.debug(expr, mode)  require("mlbuddy.debugger").debug_expr(cfg(), expr, mode)       end
+
+-- Quarto
+function M.quarto_run()          require("mlbuddy.quarto").run_cell(cfg())         end
+function M.quarto_run_all()      require("mlbuddy.quarto").run_all(cfg())          end
+function M.quarto_run_above()    require("mlbuddy.quarto").run_above(cfg())        end
+function M.quarto_train()        require("mlbuddy.quarto").run_as_trainer(cfg())   end
+function M.quarto_preview()      require("mlbuddy.quarto").preview(cfg())          end
+function M.quarto_render(fmt)    require("mlbuddy.quarto").render(cfg(), fmt)      end
+function M.quarto_torchview()    require("mlbuddy.quarto").torchview_cell(cfg())   end
+function M.quarto_debug()        require("mlbuddy.quarto").debug_cell(cfg())       end
 
 -- Notebook sub-commands
 function M.notebook_run()            require("mlbuddy.notebook").run_cell(cfg())             end

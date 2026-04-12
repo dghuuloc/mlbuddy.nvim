@@ -673,3 +673,53 @@ v1.0.0 (initial)
 
 ==============================================================================
 vim:tw=78:ts=8:ft=help:norl:
+
+==============================================================================
+12. WINDOWS SUPPORT                                        *mlbuddy-windows*
+
+mlbuddy.nvim runs natively on Windows (Win32/Win64) with no WSL required.
+All platform-specific logic is centralised in `lua/mlbuddy/platform.lua`.
+
+REQUIREMENTS ON WINDOWS ~
+
+  • Neovim 0.10+ for Windows (official installer or winget/scoop)
+  • Python via conda (Miniconda/Anaconda), pyenv-win, or installer
+  • NVIDIA GPU: drivers must include nvidia-smi.exe (installed by default)
+  • curl.exe: bundled with Windows 10/11 (System32), or install via scoop
+  • IPython: pip install ipython  (for Notebook module)
+  • Git for Windows (for PATH hygiene)
+
+RECOMMENDED SETUP ~
+>
+  winget install Neovim.Neovim
+  winget install Anaconda.Miniconda3       " or python.org installer
+  winget install GnuWin32.Curl             " if curl not found
+  pip install ipython torch torchvision
+<
+
+PYTHON RESOLUTION (Windows) ~
+
+Platform.lua searches in this order:
+  1. %CONDA_PREFIX%\Scripts\python.exe    active conda env
+  2. %VIRTUAL_ENV%\Scripts\python.exe     active venv
+  3. .venv\Scripts\python.exe             local virtualenv
+  4. venv\Scripts\python.exe
+  5. python.exe / python3.exe             PATH
+
+TERMINAL RECOMMENDATION ~
+
+Use Windows Terminal (wt.exe) for best rendering. PowerShell 7 or cmd.exe
+both work as the underlying shell. mlbuddy wraps terminal commands in
+`cmd.exe /C ...` automatically so scripts run correctly.
+
+KNOWN LIMITATIONS ON WINDOWS ~
+
+  • rocm-smi (AMD GPU) is not supported on Windows — use nvidia-smi
+  • pyenv-win is detected but some pyenv sub-commands differ
+  • Image protocol (Kitty/iTerm2) is unavailable; cell output is text-only
+  • Long path names with spaces are quoted automatically
+
+Run `:checkhealth mlbuddy` to see the full Windows status report.
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:

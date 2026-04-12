@@ -120,8 +120,7 @@ print(json.dumps(result))
 ---@param n       integer  sample count
 ---@param cb      fun(info: table)
 local function inspect_dataset(expr, python, n, cb)
-  local script = vim.fn.tempname() .. "_mlb_ds.py"
-  vim.fn.writefile(vim.split(INSPECT_PY, "\n"), script)
+  local script = require("mlbuddy.util").write_py_script(INSPECT_PY, "_mlb_ds.py")
   local out = {}
   vim.system({ python, script, expr, tostring(n) }, {
     text=true, stdout=function(_, d) if d then out[#out+1] = d end end,

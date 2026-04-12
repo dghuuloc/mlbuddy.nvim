@@ -86,8 +86,7 @@ print(json.dumps(result))
 ---@param python string
 ---@param cb     fun(info: CheckpointInfo)
 local function inspect_ckpt(path, python, cb)
-  local script = vim.fn.tempname() .. "_mlb_ckpt.py"
-  vim.fn.writefile(vim.split(INSPECT_PY, "\n"), script)
+  local script = require("mlbuddy.util").write_py_script(INSPECT_PY, "_mlb_ckpt.py")
   local out = {}
   vim.system({ python, script, path }, {
     text=true, stdout=function(_, d) if d then out[#out+1] = d end end,

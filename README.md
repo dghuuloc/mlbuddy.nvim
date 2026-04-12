@@ -1,4 +1,4 @@
-# `mlbuddy.nvim` — Machine Learning / Deep Leaning Plugin for Neovim 0.12
+# mlbuddy.nvim — Enterprise ML/DL Plugin for Neovim 0.12
 
 A comprehensive, production-quality Neovim companion for PyTorch machine learning development. 13 independent modules covering the complete ML research and production workflow.
 
@@ -52,7 +52,7 @@ Run `:checkhealth mlbuddy` to verify.
 
 ```lua
 {
-  "dghuuloc/mlbuddy.nvim",
+  "yourusername/mlbuddy.nvim",
   ft        = "python",
   config    = function()
     require("mlbuddy").setup({
@@ -310,3 +310,68 @@ mlbuddy.nvim/
 ## License
 
 MIT
+
+---
+
+## Windows Support
+
+mlbuddy.nvim runs **natively on Windows** — no WSL required.
+
+All OS-specific logic lives in `lua/mlbuddy/platform.lua` which handles:
+
+| Concern | Windows | Linux / macOS |
+|---|---|---|
+| Python path | `.venv\Scripts\python.exe` | `.venv/bin/python` |
+| nvidia-smi | `Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe` | `nvidia-smi` in PATH |
+| Terminal launch | wrapped in `cmd.exe /C ...` | direct |
+| Temp scripts | `%TEMP%\nvimXXX_mlb.py` | `/tmp/nvimXXX_mlb.py` |
+| Env activation | updates `%PATH%` + `%VIRTUAL_ENV%` | updates `$PATH` + `$VIRTUAL_ENV` |
+| pyenv | pyenv-win detected automatically | standard pyenv |
+
+### Quick Windows setup
+
+```powershell
+# 1. Install Neovim
+winget install Neovim.Neovim
+
+# 2. Install Python (choose one)
+winget install Anaconda.Miniconda3     # conda (recommended)
+winget install Python.Python.3.12      # official installer
+
+# 3. Install ML libs
+pip install torch torchvision ipython transformers
+
+# 4. In Neovim
+:checkhealth mlbuddy
+```
+
+### lazy.nvim (same as Linux/macOS)
+
+```lua
+{
+  "yourusername/mlbuddy.nvim",
+  ft     = "python",
+  config = function()
+    require("mlbuddy").setup({
+      runner = {
+        python = nil,  -- auto-detects conda/venv/system Python
+      },
+      gpu = {
+        backend = "auto",  -- auto-detects nvidia-smi.exe
+      },
+    })
+  end,
+}
+```
+
+### Windows Terminal is recommended
+
+For best rendering of Unicode box-drawing characters and Nerd Font icons,
+use [Windows Terminal](https://aka.ms/terminal) with a Nerd Font (e.g.
+JetBrainsMono NF, CaskaydiaCove NF).
+
+### Known limitations on Windows
+
+- AMD ROCm (rocm-smi) is not supported on Windows — NVIDIA only
+- Kitty/iTerm2 image protocol unavailable; notebook output is text-only
+- `deepspeed` launcher not tested on Windows

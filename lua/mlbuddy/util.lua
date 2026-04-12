@@ -1,5 +1,11 @@
---- mlbuddy/util.lua  ── Enterprise utilities
+--- mlbuddy/util.lua  ── Enterprise utilities (cross-platform)
 local M = {}
+local _plat = nil   -- lazy-loaded platform module
+
+local function plat()
+  if not _plat then _plat = require("mlbuddy.platform") end
+  return _plat
+end
 
 -- ── Numbers ──────────────────────────────────────────────────────────────────
 
@@ -335,27 +341,11 @@ end
 
 -- ── Python detection ──────────────────────────────────────────────────────────
 
---- Find the best Python executable for the current project.
+--- Find the best Python executable for the current project (cross-platform).
+--- Delegates to platform.lua which handles Windows Scripts\ vs Unix bin/ paths.
 ---@return string
 function M.find_python()
-  local cwd    = vim.fn.getcwd()
-  local candidates = {
-    cwd .. "/.venv/bin/python",
-    cwd .. "/venv/bin/python",
-    cwd .. "/.env/bin/python",
-    vim.fn.exepath("python3"),
-    vim.fn.exepath("python"),
-    "/usr/bin/python3",
-  }
-  -- Check conda env
-  local conda = vim.env.CONDA_PREFIX
-  if conda then
-    table.insert(candidates, 1, conda .. "/bin/python")
-  end
-  for _, p in ipairs(candidates) do
-    if p and p ~= "" and vim.fn.executable(p) == 1 then return p end
-  end
-  return "python3"
+  return plat().find_python()
 end
 
 --- Run a Python one-liner and return stdout synchronously (blocking, short cmd).
@@ -366,6 +356,15 @@ function M.python_eval(code, python)
   python = python or M.find_python()
   local r = vim.system({ python, "-c", code }, { text = true }):wait()
   return r.code == 0 and r.stdout:gsub("%s+$", "") or nil
+end
+
+--- Write a temp Python script to disk and return its path.
+--- Uses platform.lua for the temp file path.
+---@param lines string|string[]
+---@param suffix string|nil
+---@return string path
+function M.write_py_script(lines, suffix)
+  return plat().write_tmpfile(lines, suffix or "_mlb.py")
 end
 
 -- ── Heatmap ───────────────────────────────────────────────────────────────────
@@ -406,6 +405,7 @@ function M.scan_files(roots, exts, deep)
     while true do
       local name, type = vim.uv.fs_scandir_next(handle)
       if not name then break end
+      -- Use forward slashes internally (works on Windows too via Neovim)
       local full = dir .. "/" .. name
       if type == "file" then
         local ext = name:match("(%.[^.]+)$") or ""
@@ -418,7 +418,10 @@ function M.scan_files(roots, exts, deep)
 
   local cwd = vim.fn.getcwd()
   for _, root in ipairs(roots) do
-    local path = root:sub(1,1) == "/" and root or (cwd.."/"..root)
+    -- Accept both absolute paths and cwd-relative paths
+    local path = (root:sub(1,1) == "/" or root:match("^[A-Za-z]:"))
+      and root
+      or  (cwd .. "/" .. root)
     scan(path, 0)
   end
   return results

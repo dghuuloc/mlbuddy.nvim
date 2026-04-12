@@ -1,6 +1,8 @@
 --- mlbuddy/gpu/nvidia.lua
 --- Parses nvidia-smi and rocm-smi output into unified GPU structs.
-local M = {}
+--- Windows-aware: handles Program Files nvidia-smi path.
+local M    = {}
+local plat = require("mlbuddy.platform")
 
 -- ── Unified GPU info ──────────────────────────────────────────────────────────
 
@@ -63,9 +65,11 @@ end
 --- Query all NVIDIA GPUs asynchronously.
 ---@param cb fun(gpus: GpuInfo[])
 function M.query_nvidia(cb)
+  local smi = plat.find_nvidia_smi()
+  if not smi then return cb({}) end
   local out = {}
   vim.system(
-    { "nvidia-smi", "--query-gpu=" .. NVIDIA_QUERY, "--format=csv" },
+    { smi, "--query-gpu=" .. NVIDIA_QUERY, "--format=csv" },
     { text=true, stdout=function(_, d) if d then out[#out+1] = d end end },
     function(r)
       vim.schedule(function()
@@ -112,9 +116,11 @@ local function parse_rocm(stdout)
 end
 
 function M.query_rocm(cb)
+  local smi = plat.find_rocm_smi()
+  if not smi then return cb({}) end
   local out = {}
   vim.system(
-    { "rocm-smi", "--showuse", "--showmeminfo", "vram", "--showtemp",
+    { smi, "--showuse", "--showmeminfo", "vram", "--showtemp",
       "--showpower", "--showclocks" },
     { text=true, stdout=function(_, d) if d then out[#out+1] = d end end },
     function(r)
@@ -128,8 +134,8 @@ end
 -- ── Backend auto-detection ────────────────────────────────────────────────────
 
 function M.detect_backend()
-  if vim.fn.executable("nvidia-smi") == 1 then return "nvidia" end
-  if vim.fn.executable("rocm-smi")   == 1 then return "rocm"   end
+  if plat.find_nvidia_smi() then return "nvidia" end
+  if plat.find_rocm_smi()   then return "rocm"   end
   return nil
 end
 
