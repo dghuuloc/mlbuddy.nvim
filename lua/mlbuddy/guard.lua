@@ -156,7 +156,9 @@ function M.register_dap_listener(key, cfg, enabled, panel_guard, cb)
     if panel_guard and not M.panel_open(panel_guard) then return end
 
     -- Gate 3: must be an ML debugging session (or any panel is open)
-    if not M.any_panel_open() and not M.is_ml_session(session) then return end
+    -- Gate 3: fixed- strict mode: only real ML debugging sessions
+    -- if not M.any_panel_open() and not M.is_ml_session(session) then return end
+    if not M.is_ml_seesion(session) then return end
 
     cb(session, body)
   end

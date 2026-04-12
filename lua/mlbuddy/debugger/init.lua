@@ -52,11 +52,14 @@ end
 ---@param cb     fun(data:table)
 local function run_hook(expr, mode, python, cb)
   local script = hook_script()
+  local temp_script = false
+
   if not script then
     -- Copy bundled script to temp file
     local src_lines = vim.fn.readfile(
       debug.getinfo(1,"S").source:match("^@(.+)$"):gsub("init%.lua$","") .. "hook.py")
     script = util.write_py_script(src_lines, "_mlb_debug_hook.py")
+    temp_script = true
   end
 
   local out = {}
@@ -64,7 +67,9 @@ local function run_hook(expr, mode, python, cb)
     text = true,
     stdout = function(_, d) if d then out[#out+1] = d end end,
   }, function(r)
-    vim.fn.delete(script)   -- only deletes if it was a temp copy
+    if temp_script then
+      vim.fn.delete(script)
+    end
     vim.schedule(function()
       local body = table.concat(out)
       local data = util.json_decode(body)
