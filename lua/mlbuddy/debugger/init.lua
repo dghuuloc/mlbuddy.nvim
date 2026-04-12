@@ -221,7 +221,7 @@ end
 ---@param mode string|nil  override mode
 function M.debug_expr(cfg, expr, mode)
   expr = expr or vim.fn.expand("<cword>")
-  mode = mode or (cfg.debugger and cfg.debugger.defult_mode) or "full"
+  mode = mode or (cfg.debugger and cfg.debugger.default_mode) or "full"
   if expr == "" then
     ui.warn("No model expression — position cursor on a model variable")
     return
@@ -256,29 +256,8 @@ function M.debug_expr(cfg, expr, mode)
     M._install_keymaps(cfg)
   end
 
-  -- run_hook(expr, mode, python, function(data)
-  --   ctx.data = data
-  --   ctx.view = "summary"
-  --   renderer.redraw(ctx.buf, data, ctx.view, cfg)
-  --
-  --   -- Attach virtual text to current Python buffer
-  --   local src_buf = vim.api.nvim_get_current_buf()
-  --   if vim.bo[src_buf].filetype == "python" then
-  --     attach_virt(src_buf, data)
-  --   end
-  --
-  --   -- Notify about issues
-  --   local issues = data.issues or {}
-  --   if #issues > 0 then
-  --     ui.warn(string.format("Model '%s': %d issue%s found — check debugger panel",
-  --       expr, #issues, #issues == 1 and "" or "s"))
-  --   else
-  --     ui.info(string.format("Model '%s' looks healthy ✓", expr))
-  --   end
-  -- end)
-
   local guard = require("mlbuddy.guard")
-  guard.panel_closed("debugger")
+  guard.panel_opened("debugger")
 
   run_hook(expr, mode, python, cfg, function(data)
     if req_id ~= ctx.req_id then
@@ -292,7 +271,7 @@ function M.debug_expr(cfg, expr, mode)
       renderer.redraw(ctx.buf, data, ctx.view, cfg)
     end
 
-    if cfg.debugger == nil or cfg.debugger.vir_text ~= false then
+    if cfg.debugger == nil or cfg.debugger.virt_text ~= false then
       local src_buf = ctx.src_buf
       if src_buf and vim.api.nvim_buf_is_valid(src_buf) and vim.bo[src_buf].filetype == "python" then
         attach_virt(src_buf, data)
