@@ -102,6 +102,11 @@ require("mlbuddy").setup({
     deep_scan  = true,
   },
 
+  debugger = {
+    enabled = false,                -- normal python debugging stays normal
+    auto_inspect = false,
+  }.
+
   notebook = {
     output_height = 20,
   },
@@ -213,74 +218,6 @@ p.export_chrome_trace("trace.json")
 
 ---
 
-## Architecture
-
-```
-mlbuddy.nvim/
-├── lua/mlbuddy/
-│   ├── init.lua              ← setup(), all public API
-│   ├── config.lua            ← complete defaults for all 13 modules
-│   ├── ui.lua                ← floats, TabPanel, terminal splits, spinner, highlights
-│   ├── util.lua              ← chart2d engine, sparkline, heatmap, async http, timers
-│   ├── health.lua            ← :checkhealth mlbuddy
-│   │
-│   ├── torchview/            ← Treesitter model parser + virtual text
-│   │   ├── parser.lua        25+ layer types, nested blocks, kwargs
-│   │   ├── renderer.lua      param bars, tree connectors, float
-│   │   └── init.lua          toggle, autocmds, virt text attachment
-│   │
-│   ├── mlflow/               ← MLflow REST API v2
-│   │   ├── client.lua        curl/vim.system async HTTP
-│   │   ├── renderer.lua      run table, sparklines, redraw
-│   │   └── init.lua          toggle, timer, experiment cycle, detail view
-│   │
-│   ├── dataloader/           ← Tensor inspector
-│   │   ├── renderer.lua      heatmap, stats table, sparkline distribution
-│   │   └── init.lua          cursor inspect, DAP hooks, rotate history
-│   │
-│   ├── trainer/              ← Live training monitor
-│   │   ├── parser.lua        Lightning/HF/tqdm/JSON/kv stdout parsers
-│   │   ├── renderer.lua      2-D ASCII chart, progress bar, metrics table
-│   │   └── init.lua          multi-job registry, jobstart capture, timer
-│   │
-│   ├── gpu/                  ← GPU monitor
-│   │   ├── nvidia.lua        nvidia-smi + rocm-smi parsers, GpuInfo struct
-│   │   └── init.lua          renderer, toggle, statusline(), background poll
-│   │
-│   ├── runner/               ← Training launcher
-│   │   └── init.lua          5-framework detector, build_cmd, terminal/monitor modes
-│   │
-│   ├── checkpoint/           ← Checkpoint manager
-│   │   └── init.lua          scan, Python inspector, list+detail views, delete/resume
-│   │
-│   ├── notebook/             ← # %% cell runner
-│   │   └── init.lua          cell detection, IPython kernel, virt_lines output, signs
-│   │
-│   ├── dataset/              ← Dataset explorer
-│   │   └── init.lua          HF/torch/numpy Python inspector, sample display
-│   │
-│   ├── profiler/             ← PyTorch profiler viewer
-│   │   └── init.lua          chrome trace JSON parser, top-N table, sort
-│   │
-│   ├── env/                  ← Environment manager
-│   │   └── init.lua          detect venv/conda/poetry/pyenv, pkg list, activate
-│   │
-│   ├── wandb/                ← W&B integration
-│   │   └── init.lua          REST client, run table, sparklines, auto-refresh
-│   │
-│   └── statusline/           ← Statusline components
-│       └── init.lua          lualine/heirline/raw, GPU/env/job strings
-│
-├── plugin/
-│   └── mlbuddy.lua           ← all :Mlbuddy* commands, checkhealth provider
-├── ftplugin/
-│   └── python.lua            ← buffer-local keymaps, %% insert shortcut, cell signs
-└── doc/
-    └── mlbuddy.txt           ← :help mlbuddy
-```
-
----
-
 ## Commands reference
 
 | Command | Description |
@@ -349,7 +286,7 @@ pip install torch torchvision ipython transformers
 
 ```lua
 {
-  "yourusername/mlbuddy.nvim",
+  "dghuuloc/mlbuddy.nvim",
   ft     = "python",
   config = function()
     require("mlbuddy").setup({
