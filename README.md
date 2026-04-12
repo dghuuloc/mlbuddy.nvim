@@ -1,4 +1,4 @@
-# mlbuddy.nvim — Enterprise ML/DL Plugin for Neovim 0.12
+# <p align="center"> `mlbuddy.nvim` — ML/DL Plugin for Neovim </p>
 
 A comprehensive, production-quality Neovim companion for PyTorch machine learning development. 13 independent modules covering the complete ML research and production workflow.
 
@@ -52,7 +52,7 @@ Run `:checkhealth mlbuddy` to verify.
 
 ```lua
 {
-  "yourusername/mlbuddy.nvim",
+  "dghuuloc/mlbuddy.nvim",
   ft        = "python",
   config    = function()
     require("mlbuddy").setup({
