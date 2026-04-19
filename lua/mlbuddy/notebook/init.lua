@@ -50,17 +50,25 @@ end
 local _kernels  = {}  -- bufnr → Kernel
 local _kern_seq = 0   -- monotonic counter so each kernel gets a unique buf name
 
+-- Show the hidden kernel terminal in a split on demand
+function M.show_kernel(cfg)
+  local bufnr = vim.api.nvim_get_current_buf()
+  local k     = _kernels[bufnr]
+  if not k or not vim.api.nvim_buf_is_valid(k.buf) then
+    ui.warn("No kernel running — start one with <leader>mn"); return
+  end
+  local h = (cfg.notebook and cfg.notebook.output_height) or 15
+  vim.cmd("botright " .. h .. "split")
+  vim.api.nvim_win_set_buf(0, k.buf)
+end
+
 local function start_kernel(bufnr, cfg)
   if _kernels[bufnr] then return _kernels[bufnr] end
 
-  local python = cfg.runner and cfg.runner.python or plat.find_python()
-
-  -- Build kernel command: prefer ipython, fallback python -c IPython.start_ipython
+  local python  = cfg.runner and cfg.runner.python or plat.find_python()
   local ipython = plat.script_in_prefix(
     vim.env.VIRTUAL_ENV or vim.env.CONDA_PREFIX or "", "ipython")
-  if not plat.executable(ipython) then
-    ipython = plat.find_exe("ipython")
-  end
+  if not plat.executable(ipython) then ipython = plat.find_exe("ipython") end
 
   local kernel_cmd
   if cfg.notebook.kernel_cmd then
@@ -72,20 +80,20 @@ local function start_kernel(bufnr, cfg)
       "import IPython; IPython.start_ipython(['--no-banner','--no-confirm-exit','--simple-prompt'])" }
   end
 
-  local split_h = cfg.notebook.output_height or 15
-  vim.cmd("botright " .. split_h .. "split")
-  local win = vim.api.nvim_get_current_win()
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_win_set_buf(win, buf)
+  -- Create terminal buffer WITHOUT showing a split.
+  -- We need a window temporarily so termopen() can run, then close it.
+  local save_win = vim.api.nvim_get_current_win()
+  local buf      = vim.api.nvim_create_buf(false, true)
+
+  vim.cmd("split")                          -- open a temporary split
+  local tmp_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(tmp_win, buf)
 
   local output_lines = {}
-  -- On Windows wrap in cmd.exe
-  local launch_cmd = plat.term_cmd(kernel_cmd)
-
-  local job_id = vim.fn.termopen(launch_cmd, {
+  local job_id = vim.fn.termopen(plat.term_cmd(kernel_cmd), {
     on_stdout = function(_, lines)
       for _, l in ipairs(lines) do
-        if l and l ~= "" then output_lines[#output_lines+1] = l end
+        if l and l ~= "" then output_lines[#output_lines + 1] = l end
       end
     end,
     on_exit = function()
@@ -96,13 +104,16 @@ local function start_kernel(bufnr, cfg)
     end,
   })
 
+  -- Close the temporary window — buffer + job stay alive
+  vim.api.nvim_win_close(tmp_win, false)
+  vim.api.nvim_set_current_win(save_win)
+
+  -- Unique name to avoid E95 on restart
   _kern_seq = _kern_seq + 1
   pcall(vim.api.nvim_buf_set_name, buf,
     string.format("[mlbuddy] IPython:%d#%d", bufnr, _kern_seq))
-  vim.wo[win].number = false; vim.wo[win].signcolumn = "no"
-  vim.cmd("wincmd p")
 
-  local k = { job_id=job_id, buf=buf, win=win, bufnr=bufnr, output_lines=output_lines }
+  local k = { job_id=job_id, buf=buf, bufnr=bufnr, output_lines=output_lines }
   _kernels[bufnr] = k
   return k
 end
@@ -130,7 +141,8 @@ local function send_cell(kernel, cell, cell_idx, bufnr, cfg)
   local before    = #kernel.output_lines
   local MAX_WAIT  = 30000
   local start_t   = vim.uv.now()
-  local PROMPT    = "^In %[%d+%]:"
+  local PROMPT     = "^In %[%d+%]:%s*$"
+  local INPUT_ECHO = "^In %[%d+%]:"
 
   vim.fn.chansend(kernel.job_id, string.format("%%run -i %q\n", script))
 
@@ -145,8 +157,9 @@ local function send_cell(kernel, cell, cell_idx, bufnr, cfg)
         local out = {}
         for j = before+1, i-1 do
           local ol = kernel.output_lines[j]:gsub("\27%[[%d;]*[mK]",""):gsub("\r","")
-          if not ol:match("^%%run ") and not ol:match(PROMPT) and not ol:match("^Out%[%d+%]:") then
-            out[#out+1] = ol
+          if not ol:match("^%%run ") and not ol:match(INPUT_ECHO)   -- hide "In [N]: <command>" echo lines
+             and not ol:match("^Out%[%d+%]:") then
+             out[#out+1] = ol
           end
         end
         while #out > 0 and out[#out]:match("^%s*$") do table.remove(out) end
