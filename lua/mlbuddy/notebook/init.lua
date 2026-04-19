@@ -47,7 +47,8 @@ end
 
 -- ── Kernel management ─────────────────────────────────────────────────────────
 
-local _kernels = {}  -- bufnr → Kernel
+local _kernels  = {}  -- bufnr → Kernel
+local _kern_seq = 0   -- monotonic counter so each kernel gets a unique buf name
 
 local function start_kernel(bufnr, cfg)
   if _kernels[bufnr] then return _kernels[bufnr] end
@@ -95,7 +96,9 @@ local function start_kernel(bufnr, cfg)
     end,
   })
 
-  vim.api.nvim_buf_set_name(buf, "[mlbuddy] IPython:" .. bufnr)
+  _kern_seq = _kern_seq + 1
+  pcall(vim.api.nvim_buf_set_name, buf,
+    string.format("[mlbuddy] IPython:%d#%d", bufnr, _kern_seq))
   vim.wo[win].number = false; vim.wo[win].signcolumn = "no"
   vim.cmd("wincmd p")
 
@@ -106,67 +109,78 @@ end
 
 local function send_cell(kernel, cell, cell_idx, bufnr, cfg)
   if not kernel then return end
-  local code = table.concat(cell.content, "\n")
-  if code:gsub("%s","") == "" then return end
+
+  local code_lines = {}
+  for _, line in ipairs(cell.content) do
+    code_lines[#code_lines + 1] = line
+  end
+  while #code_lines > 0 and code_lines[1]:match("^%s*$") do
+    table.remove(code_lines, 1)
+  end
+  if #code_lines == 0 then return end
+
+  local script = plat.write_tmpfile(code_lines, "_mlb_cell.py")
 
   vim.api.nvim_buf_clear_namespace(bufnr, NS_OUTPUT, cell.start_line-1, cell.end_line)
   vim.api.nvim_buf_set_extmark(bufnr, NS_CELL, cell.start_line-1, 0, {
-    virt_text={ { " ⏳ Running…", "MlbuddyCellRun" } },
-    virt_text_pos="eol", id=cell_idx,
+    virt_text = { { " ⏳ Running…", "MlbuddyCellRun" } },
+    virt_text_pos = "eol", id = cell_idx,
   })
 
-  local before = #kernel.output_lines
-  local delim  = "__MLBUDDY_END_" .. math.floor(vim.uv.now()) .. "__"
-  -- On Windows IPython uses \r\n line endings; write safe newlines
-  local full   = code .. "\nprint('" .. delim .. "')\n"
-  vim.fn.chansend(kernel.job_id, full)
+  local before    = #kernel.output_lines
+  local MAX_WAIT  = 30000
+  local start_t   = vim.uv.now()
+  local PROMPT    = "^In %[%d+%]:"
 
-  local MAX_WAIT = 30000
-  local start    = vim.uv.now()
-  local timer    = vim.uv.new_timer()
+  vim.fn.chansend(kernel.job_id, string.format("%%run -i %q\n", script))
 
-  timer:start(100, 200, vim.schedule_wrap(function()
+  local timer = vim.uv.new_timer()
+  timer:start(120, 200, vim.schedule_wrap(function()
     for i = before+1, #kernel.output_lines do
-      if kernel.output_lines[i]:find(delim, 1, true) then
+      local l = kernel.output_lines[i]:gsub("\27%[[%d;]*[mK]",""):gsub("\r","")
+      if l:match(PROMPT) then
         timer:stop()
+        vim.fn.delete(script)
+
         local out = {}
         for j = before+1, i-1 do
-          local l = kernel.output_lines[j]
-          -- Strip ANSI + Windows CRLF
-          l = l:gsub("\27%[[%d;]*[mK]",""):gsub("\r","")
-          if not l:match("^In %[%d+%]:") and not l:match("^Out%[%d+%]:") then
-            out[#out+1] = l
+          local ol = kernel.output_lines[j]:gsub("\27%[[%d;]*[mK]",""):gsub("\r","")
+          if not ol:match("^%%run ") and not ol:match(PROMPT) and not ol:match("^Out%[%d+%]:") then
+            out[#out+1] = ol
           end
         end
+        while #out > 0 and out[#out]:match("^%s*$") do table.remove(out) end
 
         vim.api.nvim_buf_del_extmark(bufnr, NS_CELL, cell_idx)
         vim.api.nvim_buf_set_extmark(bufnr, NS_CELL, cell.start_line-1, 0, {
-          virt_text={ { " ✓ done", "MlbuddyGood" } },
-          virt_text_pos="eol", id=cell_idx,
+          virt_text = { { " ✓ done", "MlbuddyGood" } },
+          virt_text_pos = "eol", id = cell_idx,
         })
 
         if #out > 0 then
-          local max_out = cfg.notebook.output_height or 15
-          local virt    = {}
+          local max_out = cfg.notebook and cfg.notebook.output_height or 15
+          local virt = {}
           for oi = 1, math.min(#out, max_out) do
-            virt[#virt+1] = { { "  " .. out[oi]:sub(1,120), "MlbuddyDim" } }
+            local hl = out[oi]:match("^[A-Z][a-zA-Z]*Error") and "MlbuddyError" or "MlbuddyDim"
+            virt[#virt+1] = { { "  " .. out[oi]:sub(1, 130), hl } }
           end
           if #out > max_out then
             virt[#virt+1] = { { "  … " .. (#out-max_out) .. " more lines", "MlbuddyWarn" } }
           end
           vim.api.nvim_buf_set_extmark(bufnr, NS_OUTPUT, cell.end_line-1, 0, {
-            virt_lines=virt, virt_lines_above=false,
+            virt_lines = virt, virt_lines_above = false,
           })
         end
         return
       end
     end
-    if vim.uv.now()-start > MAX_WAIT then
+    if vim.uv.now() - start_t > MAX_WAIT then
       timer:stop()
+      vim.fn.delete(script)
       vim.api.nvim_buf_del_extmark(bufnr, NS_CELL, cell_idx)
       vim.api.nvim_buf_set_extmark(bufnr, NS_CELL, cell.start_line-1, 0, {
-        virt_text={ { " ⚠ timeout", "MlbuddyError" } },
-        virt_text_pos="eol", id=cell_idx,
+        virt_text = { { " ⚠ timeout — use <leader>mi to interrupt", "MlbuddyError" } },
+        virt_text_pos = "eol", id = cell_idx,
       })
     end
   end))

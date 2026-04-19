@@ -17,6 +17,7 @@ local M         = {}
 -- ── Kernel registry (one kernel per .qmd buffer) ──────────────────────────
 
 local _kernels = {}   -- bufnr → kernel state (same structure as notebook module)
+local _kern_seq = 0
 local NS_OUT   = vim.api.nvim_create_namespace("mlbuddy_qmd_out")
 local NS_CELL  = vim.api.nvim_create_namespace("mlbuddy_qmd_cell")
 
@@ -64,7 +65,9 @@ local function get_or_start_kernel(bufnr, cfg)
     end,
   })
 
-  vim.api.nvim_buf_set_name(buf, "[mlbuddy] Quarto kernel:"..bufnr)
+  _kern_seq = _kern_seq + 1
+  pcall(vim.api.nvim_buf_set_name, buf,
+    string.format("[mlbuddy] Quarto:%d#%d", bufnr, _kern_seq))
   vim.wo[win].number = false; vim.wo[win].signcolumn = "no"
   vim.cmd("wincmd p")
 
