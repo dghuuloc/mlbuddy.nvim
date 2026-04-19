@@ -57,9 +57,10 @@ function M.show_kernel(cfg)
   if not k or not vim.api.nvim_buf_is_valid(k.buf) then
     ui.warn("No kernel running — start one with <leader>mn"); return
   end
-  local h = (cfg.notebook and cfg.notebook.output_height) or 15
+  local h = cfg.notebook and cfg.notebook.output_height or 15
   vim.cmd("botright " .. h .. "split")
   vim.api.nvim_win_set_buf(0, k.buf)
+  vim.cmd("startinsert")
 end
 
 local function start_kernel(bufnr, cfg)
@@ -80,22 +81,15 @@ local function start_kernel(bufnr, cfg)
       "import IPython; IPython.start_ipython(['--no-banner','--no-confirm-exit','--simple-prompt'])" }
   end
 
-  -- Create terminal buffer WITHOUT showing a split.
-  -- We need a window temporarily so termopen() can run, then close it.
+  -- Open a temporary split just to satisfy termopen(), then immediately close it.
+  -- The buffer and job keep running hidden in the background.
   local save_win = vim.api.nvim_get_current_win()
   local buf      = vim.api.nvim_create_buf(false, true)
-
-  vim.cmd("split")                          -- open a temporary split
-  local tmp_win = vim.api.nvim_get_current_win()
+  vim.cmd("split")
+  local tmp_win  = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(tmp_win, buf)
 
-  local output_lines = {}
   local job_id = vim.fn.termopen(plat.term_cmd(kernel_cmd), {
-    on_stdout = function(_, lines)
-      for _, l in ipairs(lines) do
-        if l and l ~= "" then output_lines[#output_lines + 1] = l end
-      end
-    end,
     on_exit = function()
       vim.schedule(function()
         _kernels[bufnr] = nil
@@ -104,16 +98,14 @@ local function start_kernel(bufnr, cfg)
     end,
   })
 
-  -- Close the temporary window — buffer + job stay alive
   vim.api.nvim_win_close(tmp_win, false)
   vim.api.nvim_set_current_win(save_win)
 
-  -- Unique name to avoid E95 on restart
   _kern_seq = _kern_seq + 1
   pcall(vim.api.nvim_buf_set_name, buf,
     string.format("[mlbuddy] IPython:%d#%d", bufnr, _kern_seq))
 
-  local k = { job_id=job_id, buf=buf, bufnr=bufnr, output_lines=output_lines }
+  local k = { job_id = job_id, buf = buf, bufnr = bufnr }
   _kernels[bufnr] = k
   return k
 end
@@ -122,76 +114,123 @@ local function send_cell(kernel, cell, cell_idx, bufnr, cfg)
   if not kernel then return end
 
   local code_lines = {}
-  for _, line in ipairs(cell.content) do
-    code_lines[#code_lines + 1] = line
-  end
+  for _, line in ipairs(cell.content) do code_lines[#code_lines + 1] = line end
   while #code_lines > 0 and code_lines[1]:match("^%s*$") do
     table.remove(code_lines, 1)
   end
   if #code_lines == 0 then return end
 
-  local script = plat.write_tmpfile(code_lines, "_mlb_cell.py")
+  -- Write cell code to a temp file
+  local cell_file = plat.write_tmpfile(code_lines, "_mlb_cell.py")
+  -- Output will land here as JSON
+  local out_file  = vim.fn.tempname() .. "_mlb_out.json"
 
-  vim.api.nvim_buf_clear_namespace(bufnr, NS_OUTPUT, cell.start_line-1, cell.end_line)
-  vim.api.nvim_buf_set_extmark(bufnr, NS_CELL, cell.start_line-1, 0, {
+  -- Use forward slashes — Python's open() accepts them on all platforms
+  local cf = cell_file:gsub("\\", "/")
+  local of = out_file:gsub("\\", "/")
+
+  -- Wrapper: captures stdout/stderr, runs cell in IPython's namespace, writes JSON
+  local wrapper = {
+    "import sys as _s, json as _j, traceback as _t",
+    "_b = []",
+    "class _C:",
+    "    def write(self, x): _b.append(str(x))",
+    "    def flush(self): pass",
+    "    def isatty(self): return False",
+    "_o, _e = _s.stdout, _s.stderr",
+    "_s.stdout = _s.stderr = _C()",
+    "_k, _r = True, None",
+    "try:",
+    "    exec(compile(open('" .. cf .. "').read(), '" .. cf .. "', 'exec'), globals())",
+    "except SystemExit:",
+    "    pass",
+    "except:",
+    "    _k, _r = False, _t.format_exc()",
+    "finally:",
+    "    _s.stdout, _s.stderr = _o, _e",
+    "with open('" .. of .. "', 'w') as _f:",
+    "    _j.dump({'ok': _k, 'out': ''.join(_b), 'err': _r}, _f)",
+    "del _s, _j, _t, _b, _C, _o, _e, _k, _r, _f",
+  }
+  local wrap_file = plat.write_tmpfile(wrapper, "_mlb_wrap.py")
+
+  -- Show running indicator
+  vim.api.nvim_buf_clear_namespace(bufnr, NS_OUTPUT, cell.start_line - 1, cell.end_line)
+  vim.api.nvim_buf_set_extmark(bufnr, NS_CELL, cell.start_line - 1, 0, {
     virt_text = { { " ⏳ Running…", "MlbuddyCellRun" } },
     virt_text_pos = "eol", id = cell_idx,
   })
 
-  local before    = #kernel.output_lines
-  local MAX_WAIT  = 30000
-  local start_t   = vim.uv.now()
-  local PROMPT     = "^In %[%d+%]:%s*$"
-  local INPUT_ECHO = "^In %[%d+%]:"
+  -- Send wrapper to kernel — nothing extra appears in the terminal
+  local wf = wrap_file:gsub("\\", "/")
+  vim.fn.chansend(kernel.job_id, string.format("%%run -i '%s'\n", wf))
 
-  vim.fn.chansend(kernel.job_id, string.format("%%run -i %q\n", script))
+  -- Poll for the JSON output file — no terminal output parsing at all
+  local MAX_WAIT = 30000
+  local start_t  = vim.uv.now()
+  local timer    = vim.uv.new_timer()
 
-  local timer = vim.uv.new_timer()
-  timer:start(120, 200, vim.schedule_wrap(function()
-    for i = before+1, #kernel.output_lines do
-      local l = kernel.output_lines[i]:gsub("\27%[[%d;]*[mK]",""):gsub("\r","")
-      if l:match(PROMPT) then
-        timer:stop()
-        vim.fn.delete(script)
+  timer:start(150, 250, vim.schedule_wrap(function()
+    if vim.uv.fs_stat(out_file) then
+      timer:stop()
+      vim.fn.delete(cell_file)
+      vim.fn.delete(wrap_file)
 
-        local out = {}
-        for j = before+1, i-1 do
-          local ol = kernel.output_lines[j]:gsub("\27%[[%d;]*[mK]",""):gsub("\r","")
-          if not ol:match("^%%run ") and not ol:match(INPUT_ECHO)   -- hide "In [N]: <command>" echo lines
-             and not ol:match("^Out%[%d+%]:") then
-             out[#out+1] = ol
-          end
-        end
-        while #out > 0 and out[#out]:match("^%s*$") do table.remove(out) end
+      local ok_r, raw = pcall(vim.fn.readfile, out_file)
+      vim.fn.delete(out_file)
 
-        vim.api.nvim_buf_del_extmark(bufnr, NS_CELL, cell_idx)
-        vim.api.nvim_buf_set_extmark(bufnr, NS_CELL, cell.start_line-1, 0, {
-          virt_text = { { " ✓ done", "MlbuddyGood" } },
-          virt_text_pos = "eol", id = cell_idx,
-        })
+      local result   = ok_r and require("mlbuddy.util").json_decode(table.concat(raw, "")) or nil
+      local out_text = result and result.out or ""
+      local err_text = result and result.err or nil
+      local is_err   = err_text ~= nil and err_text ~= vim.NIL and err_text ~= ""
 
-        if #out > 0 then
-          local max_out = cfg.notebook and cfg.notebook.output_height or 15
-          local virt = {}
-          for oi = 1, math.min(#out, max_out) do
-            local hl = out[oi]:match("^[A-Z][a-zA-Z]*Error") and "MlbuddyError" or "MlbuddyDim"
-            virt[#virt+1] = { { "  " .. out[oi]:sub(1, 130), hl } }
-          end
-          if #out > max_out then
-            virt[#virt+1] = { { "  … " .. (#out-max_out) .. " more lines", "MlbuddyWarn" } }
-          end
-          vim.api.nvim_buf_set_extmark(bufnr, NS_OUTPUT, cell.end_line-1, 0, {
-            virt_lines = virt, virt_lines_above = false,
-          })
-        end
-        return
+      -- Build display lines
+      local out = {}
+      local src = is_err and err_text or out_text
+      for _, l in ipairs(vim.split(src, "\n", { plain = true })) do
+        out[#out + 1] = l
       end
+      while #out > 0 and out[#out]:match("^%s*$") do table.remove(out) end
+
+      -- Status marker
+      vim.api.nvim_buf_del_extmark(bufnr, NS_CELL, cell_idx)
+      vim.api.nvim_buf_set_extmark(bufnr, NS_CELL, cell.start_line - 1, 0, {
+        virt_text = { {
+          is_err and " ✗ error" or " ✓ done",
+          is_err and "MlbuddyError" or "MlbuddyGood",
+        } },
+        virt_text_pos = "eol", id = cell_idx,
+      })
+
+      -- Virtual output lines
+      if #out > 0 then
+        local max_out = cfg.notebook and cfg.notebook.output_height or 15
+        local virt    = {}
+        for oi = 1, math.min(#out, max_out) do
+          local hl = (is_err or out[oi]:match("^[A-Z][a-zA-Z]*Error"))
+            and "MlbuddyError" or "MlbuddyDim"
+          virt[#virt + 1] = { { "  " .. out[oi]:sub(1, 130), hl } }
+        end
+        if #out > max_out then
+          virt[#virt + 1] = { {
+            "  … " .. (#out - max_out) .. " more lines",
+            "MlbuddyWarn",
+          } }
+        end
+        vim.api.nvim_buf_set_extmark(bufnr, NS_OUTPUT, cell.end_line - 1, 0, {
+          virt_lines = virt, virt_lines_above = false,
+        })
+      end
+      return
     end
+
     if vim.uv.now() - start_t > MAX_WAIT then
       timer:stop()
-      vim.fn.delete(script)
+      vim.fn.delete(cell_file)
+      vim.fn.delete(wrap_file)
+      vim.fn.delete(out_file)
       vim.api.nvim_buf_del_extmark(bufnr, NS_CELL, cell_idx)
-      vim.api.nvim_buf_set_extmark(bufnr, NS_CELL, cell.start_line-1, 0, {
+      vim.api.nvim_buf_set_extmark(bufnr, NS_CELL, cell.start_line - 1, 0, {
         virt_text = { { " ⚠ timeout — use <leader>mi to interrupt", "MlbuddyError" } },
         virt_text_pos = "eol", id = cell_idx,
       })
